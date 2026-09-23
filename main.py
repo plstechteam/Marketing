@@ -371,6 +371,24 @@ def graph_token(tenant_id, client_id, client_secret):
     return r.json()["access_token"]
 
 
+def check_destination(token):
+    """Confirm the target folder exists and say whether the file does yet."""
+    headers = {"Authorization": f"Bearer {token}"}
+    folder = FILE_PATH.rsplit("/", 1)[0]
+    base = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/"
+    r = request_with_retry("GET", base + folder, headers=headers)
+    if r.status_code != 200:
+        fail(f"SharePoint folder '{folder}': {r.status_code} — {r.text}")
+    print(f"SharePoint folder OK: {folder}")
+    r = request_with_retry("GET", base + FILE_PATH, headers=headers)
+    if r.status_code == 200:
+        print(f"'{FILE_PATH}' exists ({r.json().get('size', 0) / 1024:.1f} KB) — a real run overwrites it")
+    elif r.status_code == 404:
+        print(f"'{FILE_PATH}' does not exist yet — the first real run creates it")
+    else:
+        fail(f"SharePoint file check: {r.status_code} — {r.text}")
+
+
 def upload(workbook_bytes, token):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{FILE_PATH}:/content"
     r = request_with_retry(
@@ -466,14 +484,19 @@ def main():
     workbook = build_workbook(df_deals, df_stages, df_owners)
     size_kb = len(workbook) / 1024
 
+    token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
+    print("Graph token obtained OK")
+
     if DRY_RUN:
+        # A dry run still proves Graph can see the destination, so the first
+        # real run is not where a wrong drive, folder or permission shows up.
+        check_destination(token)
         # Counts only — deal names are client data and must not reach CI logs.
         print(f"DRY RUN: would upload {size_kb:.1f} KB to {FILE_PATH}")
         print(f"DRY RUN: {DEALS_SHEET} {len(df_deals)} rows x {len(df_deals.columns)} columns, "
               f"{STAGES_SHEET} {len(df_stages)}, {OWNERS_SHEET} {len(df_owners)}")
         return
 
-    token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
     status = upload(workbook, token)
     print(f"File {'created' if status == 201 else 'uploaded'} ({size_kb:.1f} KB): {FILE_PATH}")
     print(f"Rows written: {len(df_deals)} x {len(df_deals.columns)} columns")
