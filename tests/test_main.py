@@ -144,8 +144,8 @@ def test_sheet_lookups_order_and_headers():
         "Close Date", "Close Date Source",
         "Lead - Source",
         "Manufacturer", main.AB1755_HEADER, "RO Review (Final Decision)",
+        'Date entered "Intake (Lemon Law)"',  # a milestone now, not stage history
         "Deal Owner", "Deal Owner ID",
-        'Date entered "Intake (Lemon Law)"',
         "Some New Property",                  # unplaced property: kept, before Audit
         "Pipeline", "Last Refresh"]
     row = sheet.iloc[0]
@@ -175,17 +175,36 @@ def test_durations_are_calendar_days_and_blank_when_a_date_is_missing():
     assert main.days_between(None, date(2026, 1, 3)) is None
     df = pd.DataFrame({
         "createdate": [datetime(2026, 1, 1, 9), datetime(2026, 2, 1, 9)],
+        main.INTAKE_ENTERED: [datetime(2026, 1, 2, 9), None],
         "date___ro_review": [date(2026, 1, 11), None],
-        "hs_v2_date_exited_5792630": [datetime(2026, 1, 21, 15), None],
+        "date___retained": [date(2026, 1, 15), None],
+        main.READY_FOR_LEGAL: [datetime(2026, 1, 21, 15), None],
         "date___settled": [date(2026, 5, 1), None],
     })
     out = main.add_durations(df)
-    assert out["days_created_to_ro_review"].tolist()[0] == 10
-    assert out["days_ro_review_to_file_set_up"].tolist()[0] == 10
-    assert out["days_created_to_file_set_up"].tolist()[0] == 20
-    assert out["days_created_to_settled"].tolist()[0] == 120
-    assert out["days_created_to_ro_review"].isna().tolist() == [False, True]
+    first = {k: out[k].tolist()[0] for k, _, _, _ in main.DURATIONS}
+    assert first == {
+        "days_created_to_intake": 1,
+        "days_created_to_ro_review": 10,
+        "days_intake_to_signed": 13,
+        "days_ro_review_to_signed": 4,
+        "days_signed_to_ready_for_legal": 6,
+        "days_ro_review_to_ready_for_legal": 10,
+        "days_intake_to_ready_for_legal": 19,
+        "days_created_to_ready_for_legal": 20,
+        "days_created_to_settled": 120,
+    }
+    assert out["days_intake_to_signed"].isna().tolist() == [False, True]
 
+
+def test_milestones_in_case_order_and_intake_not_repeated_in_stage_history():
+    cols = ["createdate", main.INTAKE_ENTERED, "date___ro_review", "date___retained",
+            main.READY_FOR_LEGAL, "hs_v2_date_entered_5411640"]
+    order = main.column_order(cols, [main.INTAKE_ENTERED, "hs_v2_date_entered_5411640"])
+    assert order.count(main.INTAKE_ENTERED) == 1
+    assert order.index(main.INTAKE_ENTERED) < order.index("date___ro_review") \
+        < order.index("date___retained") < order.index(main.READY_FOR_LEGAL) \
+        < order.index("hs_v2_date_entered_5411640")
 
 def test_headers_are_english_ascii():
     for header in main.FIXED_HEADERS.values():
