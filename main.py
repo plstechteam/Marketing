@@ -196,6 +196,30 @@ def parse_hubspot_date(raw):
     return pd.Timestamp(str(raw)[:10]).date()
 
 
+def stage_date_properties(stage_ids, definitions):
+    """Pick one date column per stage: when the deal entered it, else when it
+    exited it, else none.
+
+    HubSpot does not create a "date entered" property for every stage — in
+    this portal HOLD, Retained - Client Dropped, Settled - Referred Out and
+    TEST have none, and HOLD has only "date exited". A column for a property
+    that does not exist would be blank on every row and read as missing data,
+    so those stages get the exited date where there is one and no column
+    otherwise. The deals themselves are unaffected: their stage is in
+    Deal Stage and the date they got there in Date entered current stage.
+    """
+    columns, skipped = [], []
+    for sid in stage_ids:
+        for kind in ("entered", "exited"):
+            name = f"hs_v2_date_{kind}_{sid}"
+            if name in definitions:
+                columns.append(name)
+                break
+        else:
+            skipped.append(sid)
+    return columns, skipped
+
+
 def unique_headers(names):
     """Make headers unique by appending the internal name to any repeat."""
     seen = {}
@@ -282,7 +306,10 @@ def fetch_property_definitions(names, headers):
     if r.status_code not in (200, 207):
         fail(f"property definitions: {r.status_code} — {r.text}")
     definitions = {p["name"]: p for p in r.json().get("results", [])}
-    missing = [n for n in names if n not in definitions]
+    # Stage date properties are probed, not assumed — stage_date_properties
+    # reports the ones that are absent — so only the fixed list warns here.
+    missing = [n for n in names if n not in definitions
+               and not (n.startswith("hs_v2_date_") and n.rsplit("_", 1)[-1].isdigit())]
     if missing:
         # Kept as blank columns: a renamed or archived property should show up
         # as an empty column and a warning, not kill the report.
@@ -450,9 +477,14 @@ def main():
     pipeline_label, stages = fetch_pipeline(hs_headers)
     print(f"Pipeline '{pipeline_label}': {len(stages)} stages")
     stage_labels = {s["id"]: s["label"] for s in stages}
-    properties = BASE_PROPERTIES + [f"hs_v2_date_entered_{s['id']}" for s in stages]
-
-    definitions = fetch_property_definitions(properties, hs_headers)
+    stage_candidates = [f"hs_v2_date_{kind}_{s['id']}"
+                        for s in stages for kind in ("entered", "exited")]
+    definitions = fetch_property_definitions(BASE_PROPERTIES + stage_candidates, hs_headers)
+    stage_columns, skipped = stage_date_properties([s["id"] for s in stages], definitions)
+    if skipped:
+        print(f"Stages with no entered/exited date property in HubSpot (no column): "
+              f"{', '.join(stage_labels[i] for i in skipped)}")
+    properties = BASE_PROPERTIES + stage_columns
     owners = fetch_owners(hs_headers)
     print(f"Owners loaded: {len(owners)}")
 

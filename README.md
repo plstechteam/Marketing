@@ -66,9 +66,13 @@ The first real run creates the file; later runs overwrite it.
   `Pre-Lit (OPT OUT OEM)`, plus the non-opt values (`Sign Up - Pre-Lit`,
   `Sign Up - Lit (AB1755)`, `Sign Up - Pre-Lit (GM)`, …)
 - Legal Sub Phase, Intake Outcome, Class Action, Lemon Law - State
-- **Date entered "<stage>"** — one column per stage of the pipeline, HOLD
-  included, built from the pipeline at run time so a new stage gets its column
-  without a code change
+- **Date entered "<stage>"** — one column per stage of the pipeline, built
+  from the pipeline at run time so a new stage gets its column without a code
+  change. HubSpot has no "date entered" property for four stages: **HOLD**
+  gets **Date exited "HOLD"** instead; Retained - Client Dropped, Settled -
+  Referred Out and TEST have neither and get no column. Their deals are still
+  in the sheet — Deal Stage says where they are and Date entered current
+  stage says since when
 - Last Refresh (Pacific)
 
 Size: ~18,000 rows and ~3.5 MB in September 2026, ~5 MB by year end.

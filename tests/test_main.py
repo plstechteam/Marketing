@@ -77,6 +77,13 @@ def test_build_deals_frame_headers_and_lookups():
     assert row["Create Date"] == datetime(2026, 3, 1, 7, 0)
 
 
+def test_stage_date_properties_falls_back_to_exited_then_skips():
+    defs = {"hs_v2_date_entered_1": {}, "hs_v2_date_exited_1": {}, "hs_v2_date_exited_2": {}}
+    cols, skipped = main.stage_date_properties(["1", "2", "3"], defs)
+    assert cols == ["hs_v2_date_entered_1", "hs_v2_date_exited_2"]
+    assert skipped == ["3"]
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]
