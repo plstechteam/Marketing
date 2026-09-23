@@ -6,10 +6,6 @@ name: Marketing Report
 # the cron, doubling the Actions minutes and letting two runs write the same
 # SharePoint file at once.
 on:
-  # TEMPORARY — validation before merge. A push to this branch runs the job
-  # as a forced dry run (see DRY_RUN below). Remove before merging.
-  push:
-    branches: [claude/zen-babbage-1ejgw0]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -54,7 +50,7 @@ jobs:
       - name: Run report script
         env:
           PYTHONUNBUFFERED: '1'
-          DRY_RUN: ${{ github.event_name == 'push' || inputs.dry_run }}
+          DRY_RUN: ${{ inputs.dry_run }}
           # Empty means "use the default", which is the live file; main.py
           # reads this with `or` so an empty string does not win.
           SHAREPOINT_FILE_PATH: ${{ inputs.file_path }}

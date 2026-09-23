@@ -43,8 +43,8 @@ OWNERS_SHEET = "Owners"
 
 # The deal columns, in sheet order. Headers come from HubSpot's own labels.
 # The "Date entered <stage>" columns are not listed here: they are built from
-# the pipeline's stages at run time, so a stage added in HubSpot (HOLD
-# included) gets its column without a code change.
+# the pipeline's stages at run time, so a stage added in HubSpot gets its
+# column without a code change — see stage_date_properties.
 BASE_PROPERTIES = [
     "hs_object_id",
     "dealname",
