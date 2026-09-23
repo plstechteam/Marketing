@@ -62,7 +62,7 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 | Group | Columns |
 |---|---|
 | **Deal** | Record ID, Deal Name, Lemon Law - State, Create Date |
-| **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Deal Stage Is Closed, Date entered current stage, Close Date, Close Date Source |
+| **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Is Closed, Is Settled, Date entered current stage, Close Date, Close Date Source |
 | **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
 | **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
 | **Milestones** | Date entered "Intake", Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
@@ -77,15 +77,20 @@ still comes out, just before Audit — and a test fails until it is placed.
 
 ### Column notes
 
-- **Deal Stage Is Closed** — true for Settled - Lit, Settled - Pre Lit,
-  Settled - Referred Out, Close Out, Retained - Drop Client, Retained - Client
-  Dropped and Referred Out - Complete (`CLOSED_STAGE_LABELS`). HubSpot's own
-  closed flag is not used: it marks only the Settled stages. A closed label
-  missing from the pipeline stops the run.
+- **Is Settled** — true when Date - Settled is filled, whatever the stage.
+  Date - Settled is what confirms a settlement: settled cases routinely stay
+  in Retained - Lit / Retained - Pre Lit (all 31 of September 2026's
+  settlements created this year did), so the stage alone misses them.
+- **Is Closed** — true when Is Settled, or when the stage is one of Settled -
+  Lit, Settled - Pre Lit, Settled - Referred Out, Close Out, Retained - Drop
+  Client, Retained - Client Dropped and Referred Out - Complete
+  (`CLOSED_STAGE_LABELS`). HubSpot's own closed flag is not used: it marks
+  only the Settled stages. A closed label missing from the pipeline stops the
+  run.
 - **Close Date / Close Date Source** — filled for every closed deal, blank for
   open ones. HubSpot's own Close Date is never set in this pipeline, so it
-  comes from Date - Settled (Settled stages), Date - Referred Out (Referred
-  Out - Complete) or Date - Closed Out then Date - Close Out After Retained
+  comes from Date - Settled whenever it is filled (any stage), Date -
+  Referred Out (Referred Out - Complete) or Date - Closed Out then Date - Close Out After Retained
   (the rest), and the date the deal entered its current stage when that field
   is blank. Close Date Source names the field used, by its label.
 - **AB 1755 (Manufacturer)** — `Opt In`, `Opt Out` or `Not on list`, from the

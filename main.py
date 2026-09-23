@@ -448,7 +448,8 @@ FIXED_HEADERS = {
     "hs_object_id": "Record ID",
     "dealstage__id": "Deal Stage ID",
     "dealstage__order": "Deal Stage Order",
-    "dealstage__closed": "Deal Stage Is Closed",
+    "dealstage__closed": "Is Closed",
+    "is_settled": "Is Settled",
     "close_date": "Close Date",
     "close_date_source": "Close Date Source",
     "s__manufacturer__ab1755": AB1755_HEADER,
@@ -466,7 +467,7 @@ FIXED_HEADERS = {
 # stage, in pipeline order.
 COLUMN_GROUPS = [
     ("Deal", ["hs_object_id", "dealname", "legal_pipeline", "createdate"]),
-    ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed",
+    ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed", "is_settled",
                        "hs_v2_date_entered_current_stage", "close_date", "close_date_source"]),
     ("Source / channel", ["lead___source", "lead___source__group_", "hs_analytics_source",
                           "hs_analytics_source_data_1", "hs_object_source_label",
@@ -713,8 +714,15 @@ def add_stage_attributes(df, stages):
     info = {s["id"]: s for s in stages}
     ids = df["dealstage__id"]
     df["dealstage__order"] = ids.map(lambda i: info[i].get("displayOrder") if i in info else None)
+    # A deal with a settlement date is settled, whatever stage it sits in:
+    # settled cases routinely stay in Retained - Lit / Retained - Pre Lit
+    # (all 31 of September 2026's settlements created this year did), and
+    # reading the stage alone showed them as open with no close date.
+    settled = df["date___settled"].notna() if "date___settled" in df.columns \
+        else pd.Series(False, index=df.index)
+    df["is_settled"] = settled
     df["dealstage__closed"] = ids.map(
-        lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None)
+        lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else False) | settled
     return df
 
 
@@ -735,6 +743,11 @@ def close_date_for(props, stage_label, is_closed):
     """
     if not is_closed:
         return None, None
+    # Date - Settled is what confirms a settlement, so it dates the close
+    # whenever it is filled — also for a settled deal still in a Retained
+    # stage.
+    if props.get("date___settled"):
+        return parse_hubspot_date(props["date___settled"]), "date___settled"
     if stage_label.lower().startswith("settled"):
         preferred = ["date___settled"]
     elif stage_label.lower().startswith("referred out"):
@@ -770,7 +783,7 @@ def add_close_date(df, deals, stages):
     for deal in deals:
         p = deal.get("properties", {})
         stage = info.get(p.get("dealstage"), {})
-        closed = stage.get("label") in CLOSED_STAGE_LABELS
+        closed = stage.get("label") in CLOSED_STAGE_LABELS or bool(p.get("date___settled"))
         d, src = close_date_for(p, stage.get("label", ""), closed)
         dates.append(d)
         sources.append(src)
@@ -910,7 +923,11 @@ def main():
         # Fill rate per column — counts, no client data — so a dry run shows
         # which columns HubSpot actually populates.
         filled = df_deals.notna().sum()
-        closed = df_deals["Deal Stage Is Closed"] == True  # noqa: E712
+        closed = df_deals["Is Closed"] == True  # noqa: E712
+        settled = df_deals["Is Settled"] == True  # noqa: E712
+        print(f"DRY RUN: settled deals (Date - Settled filled) {int(settled.sum())}; by current stage:")
+        for stage, n in df_deals.loc[settled, "Deal Stage"].value_counts().items():
+            print(f"    {n:>6}  {stage}")
 
         print(f"DRY RUN: closed deals {int(closed.sum())}, with Close Date "
               f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
