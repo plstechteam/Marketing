@@ -50,79 +50,85 @@ The first real run creates the file; later runs overwrite it.
 ## The workbook
 
 **One sheet, `Deals`, one row per Lemon Law deal created this year — every
-one of them — and every row stands on its own** —
-no lookup tabs. Stage and owner come as names with their IDs beside them, and
-the stage's pipeline order and closed flag are on the row. Headers are
-HubSpot's property labels.
+one of them — and every row stands on its own** (no lookup tabs). Headers are
+HubSpot's property labels, except the columns this script adds.
 
-Columns:
+### Column layout
 
-- Record ID, Deal Name, Pipeline
-- Deal Stage ID, Deal Stage, **Deal Stage Order** (pipeline order, for sorting
-  the funnel), **Deal Stage Is Closed** — true for the three Settled stages,
-  Close Out, Retained - Drop Client, Retained - Client Dropped and Referred
-  Out - Complete
-  (`CLOSED_STAGE_LABELS` in `main.py`). HubSpot's own closed flag is not used:
-  it marks only the Settled stages, so Close Out would read as open. A closed
-  label missing from the pipeline stops the run
-- **Close Date**, **Close Date Source** — filled for every closed deal, blank
-  for open ones. HubSpot's own Close Date is never
-  set in this pipeline, so it comes from the firm's fields: **Date - Settled**
-  for the Settled stages, **Date - Referred Out** for Referred Out - Complete,
-  **Date - Closed Out** (then Date - Close Out After Retained) for the rest, and the date the deal entered its current stage when
-  that field is blank. Close Date Source names the field used
-- Deal Owner ID, Deal Owner
-- **Intake - Case Supervisor**, **Senior Case Supervisor**, **Legal - Handling
-  Attorney**, **Settlement Attorney** — names; archived people resolve through
-  the owner list
-- Create Date, Last Modified Date, Date entered current stage
-- **Case Category** (Lit / Pre-Lit), **Date - Settled**, Date - Closed Out,
-  Date - Close Out After Retained, Date - Referred Out
-- **Date - RO Review**, **Date exited "New File Set Up - Doc Collection"**
-  (the Lemon Law file set-up stage; there is no "New File Set Up - Intake"
-  in this pipeline)
-- **Total Settled Attorneys Fees and Cost**, **Net Attorney Fees** — numbers
-- **Manufacturer** (full name, e.g. "General Motors LLC" — the one to match an
-  opt-in / opt-out manufacturer list against), **Vehicle - Year**,
-  **Vehicle - Model**
-- **AB 1755 (Manufacturer)** — right after Manufacturer: `Opt In`, `Opt Out`
-  or `Not on list`, from the published AB 1755 list (`AB1755_OPT_IN` /
-  `AB1755_OPT_OUT` in `main.py`, keyed on the stored manufacturer value).
-  Genesis files under Hyundai, Infiniti under Nissan; Isuzu has no value in
-  HubSpot. Checked against RO Review (Final Decision) on 2026 deals: 2 of 485
-  disagree
-- Lead - Source, Lead - Source (Group), Original Traffic Source, Original
-  Traffic Source Drill-Down 1, Record source
-- **Channel detail** — what splits Prospect by channel, since Lead - Source
-  (Group) has no calls or forms bucket:
-  - AirCall Entry Number — inbound call, and the line it came in on
-  - Auto Dialer Call Type — outbound auto-dialer (Crexendo) call
-  - TF: UTM Source / Medium / Campaign — the Typeform (web form) UTMs
-  - GCLID — Google Ads click (PPC)
-- **Close Out Reason** (`drop_reason`) — the detail for Closed Lost
-- **RO Review (Final Decision)** (`ro_review__final_decision_`) — the opt-in /
-  opt-out split: `Lit - Opt In`, `Lit - Opt Out`, `Pre-Lit (OPT IN OEM)`,
-  `Pre-Lit (OPT OUT OEM)`, plus the non-opt values (`Sign Up - Pre-Lit`,
-  `Sign Up - Lit (AB1755)`, `Sign Up - Pre-Lit (GM)`, …)
-- Legal Sub Phase, Lemon Law - State
-- **Date entered "<stage>"** — one column per stage of the pipeline, built
-  from the pipeline at run time so a new stage gets its column without a code
-  change. HubSpot has no "date entered" property for four stages: **HOLD**
-  gets **Date exited "HOLD"** instead; Retained - Client Dropped, Settled -
-  Referred Out and TEST have neither and get no column. Their deals are still
-  in the sheet — Deal Stage says where they are and Date entered current
-  stage says since when
-- Last Refresh (Pacific)
+Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
+`main.py` — the one place to move a column):
 
-A dry run prints how many rows have a value in each column (counts only).
+| Group | Columns |
+|---|---|
+| **Deal** | Record ID, Deal Name, Lemon Law - State, Create Date |
+| **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Deal Stage Is Closed, Date entered current stage, Close Date, Close Date Source |
+| **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
+| **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
+| **Milestones** | Date - RO Review, Date exited "New File Set Up - Doc Collection", Date - Referred Out |
+| **Outcome** | Case Category, Date - Settled, Total Settled Attorneys Fees and Cost, Net Attorney Fees, Close Out Reason, Date - Closed Out, Date - Close Out After Retained, Legal Sub Phase |
+| **People** | Deal Owner, Deal Owner ID, Intake - Case Supervisor, Senior Case Supervisor, Legal - Handling Attorney, Settlement Attorney |
+| **Stage history** | Date entered "<stage>" for every stage, in pipeline order |
+| **Audit** | Pipeline, Last Modified Date, Last Refresh |
+
+A property added to `BASE_PROPERTIES` without a place in `COLUMN_GROUPS`
+still comes out, just before Audit — and a test fails until it is placed.
+
+### Column notes
+
+- **Deal Stage Is Closed** — true for Settled - Lit, Settled - Pre Lit,
+  Settled - Referred Out, Close Out, Retained - Drop Client, Retained - Client
+  Dropped and Referred Out - Complete (`CLOSED_STAGE_LABELS`). HubSpot's own
+  closed flag is not used: it marks only the Settled stages. A closed label
+  missing from the pipeline stops the run.
+- **Close Date / Close Date Source** — filled for every closed deal, blank for
+  open ones. HubSpot's own Close Date is never set in this pipeline, so it
+  comes from Date - Settled (Settled stages), Date - Referred Out (Referred
+  Out - Complete) or Date - Closed Out then Date - Close Out After Retained
+  (the rest), and the date the deal entered its current stage when that field
+  is blank. Close Date Source names the field used, by its label.
+- **AB 1755 (Manufacturer)** — `Opt In`, `Opt Out` or `Not on list`, from the
+  published AB 1755 list (`AB1755_OPT_IN` / `AB1755_OPT_OUT`, keyed on the
+  stored manufacturer value). Genesis files under Hyundai, Infiniti under
+  Nissan; Isuzu has no value in HubSpot. AB 1755 is California law — filter
+  Lemon Law - State to California for the split. Checked against RO Review
+  (Final Decision) on 2026 deals: 2 of 485 disagree.
+- **Manufacturer** is the full legal name, e.g. "General Motors LLC".
+- **People** columns are names; archived people resolve through the owner list.
+- **Stage history** — HubSpot has no "date entered" property for four stages:
+  HOLD gets Date exited "HOLD" instead; Retained - Client Dropped, Settled -
+  Referred Out and TEST get no column. Their deals are still in the sheet.
+- There is no "New File Set Up - Intake" stage in this pipeline; the file
+  set-up stage is "New File Set Up - Doc Collection".
+- Fees are written as numbers; dates in Bogota time; Last Refresh in Pacific.
 
 **Left out because HubSpot never fills them** on this year's Lemon Law deals
 (measured on all 18,111 in September 2026): Close Date, Intake Outcome, Class
 Action, the deal-level utm_source / utm_medium / utm_campaign, Lead Generation
-Form and Form ID. HubSpot's own Close Date is blank on every Lemon Law deal —
-the sheet's Close Date above replaces it.
+Form and Form ID.
 
-Size: ~18,000 rows and ~3.5–4 MB in September 2026, ~5–6 MB by year end.
+A dry run prints how many rows have a value in each column, the Close Date
+sources and the AB 1755 split (counts only).
+
+Size: ~18,000 rows and ~5 MB in September 2026, ~7 MB by year end.
+
+## Every run is a full refresh
+
+Nothing is carried over from the previous file. Each run pulls **every** deal
+created this year and **every** column from HubSpot again, and overwrites the
+workbook. So whatever changed in HubSpot since the last run — a stage move, a
+close, a new settlement date or fee, a reassigned attorney, a corrected
+manufacturer, a deal merged or deleted — is in the next file. There is no
+"only recent changes" mode to fall out of step.
+
+What makes sure a run either lands complete or changes nothing:
+
+- Each month's pull must return exactly the count HubSpot reports, and none
+  may reach the 10,000-result ceiling.
+- Every row must have a create date inside 1 January .. now.
+- After the upload, the size SharePoint reports storing must equal the
+  workbook the run built; otherwise the run fails.
+- Any of these failing stops the run **before or without** a partial write,
+  and the previous file stays as it was — stale, never truncated.
 
 ## Failure behaviour
 

@@ -349,10 +349,12 @@ def unique_headers(names):
 
 
 def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipeline_label):
-    """Raw deals -> one row per deal, HubSpot labels as headers.
+    """Raw deals -> one row per deal, columns keyed by HubSpot internal name.
 
     Only lookups happen here (stage id -> name, owner id -> name, enumeration
-    value -> label) and a timezone conversion on dates. No derived columns.
+    value -> label) and a timezone conversion on dates. Columns stay keyed by
+    internal name until to_sheet orders and labels them, so nothing
+    downstream depends on a label HubSpot could rename.
     """
     records = []
     for deal in deals:
@@ -383,23 +385,81 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
             else:
                 row[name] = raw if raw != "" else None
         records.append(row)
+    return pd.DataFrame(records)
 
-    columns = []
-    for name in properties:
-        label = (definitions.get(name, {}).get("label") or name).strip()
-        if name == "dealstage":
-            columns.append(("dealstage__id", "Deal Stage ID"))
-        if name == "hubspot_owner_id":
-            columns.append(("hubspot_owner_id__id", "Deal Owner ID"))
-            label = "Deal Owner"
-        if name == "hs_object_id":
-            label = "Record ID"
-        columns.append((name, label))
-        if name == "s__manufacturer":
-            columns.append(("s__manufacturer__ab1755", AB1755_HEADER))
 
-    df = pd.DataFrame(records, columns=[c for c, _ in columns])
-    df.columns = unique_headers([(label, c) for c, label in columns])
+# Headers for the columns this script adds or renames; everything else is
+# headed by its HubSpot label.
+FIXED_HEADERS = {
+    "hs_object_id": "Record ID",
+    "dealstage__id": "Deal Stage ID",
+    "dealstage__order": "Deal Stage Order",
+    "dealstage__closed": "Deal Stage Is Closed",
+    "close_date": "Close Date",
+    "close_date_source": "Close Date Source",
+    "s__manufacturer__ab1755": AB1755_HEADER,
+    "hubspot_owner_id": "Deal Owner",
+    "hubspot_owner_id__id": "Deal Owner ID",
+    "last_refresh": "Last Refresh",
+}
+
+# Sheet layout, left to right in the order the funnel reads: who the deal is,
+# where it stands now, where it came from, what vehicle and AB 1755 side it
+# is on, the milestones on the way, how it ended, who is on it, and the full
+# stage history. "STAGE_HISTORY" expands to one date column per pipeline
+# stage, in pipeline order.
+COLUMN_GROUPS = [
+    ("Deal", ["hs_object_id", "dealname", "legal_pipeline", "createdate"]),
+    ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed",
+                       "hs_v2_date_entered_current_stage", "close_date", "close_date_source"]),
+    ("Source / channel", ["lead___source", "lead___source__group_", "hs_analytics_source",
+                          "hs_analytics_source_data_1", "hs_object_source_label",
+                          "aircall_entry_number", "auto_dialer_call_type",
+                          "tf__utm_source", "tf__utm_medium", "tf__utm_campaign", "gclid"]),
+    ("Vehicle / AB 1755", ["s__manufacturer", "s__manufacturer__ab1755",
+                           "ro_review__final_decision_", "vehicle___year",
+                           "c__vehicle___model__new_test_"]),
+    ("Milestones", ["date___ro_review", "hs_v2_date_exited_5792630", "date___referred_out"]),
+    ("Outcome", ["case_category", "date___settled", "total_settled_attorneys_fees_and_cost",
+                 "net_attorney_fees", "drop_reason", "date___dropped",
+                 "date__intake_sign_up_close_out", "deal_stage___sub_phase"]),
+    ("People", ["hubspot_owner_id", "hubspot_owner_id__id", "n5__retainer_representative",
+                "senior_case_supervisor", "handling_attorney", "supervising_attorney"]),
+    ("Stage history", ["STAGE_HISTORY"]),
+    ("Audit", ["pipeline", "hs_lastmodifieddate", "last_refresh"]),
+]
+
+
+def column_order(columns, stage_columns):
+    """Internal column keys in sheet order. A column no group names (a
+    property added to BASE_PROPERTIES but not placed) goes just before
+    Audit rather than being dropped."""
+    ordered = []
+    for group, keys in COLUMN_GROUPS:
+        if group == "Audit":
+            placed = set(ordered) | set(keys)
+            ordered += [c for c in columns if c not in placed]
+        for key in keys:
+            if key == "STAGE_HISTORY":
+                ordered += [c for c in stage_columns if c in columns]
+            elif key in columns:
+                ordered.append(key)
+    return list(dict.fromkeys(ordered))
+
+
+def header_for(key, definitions):
+    return FIXED_HEADERS.get(key) or (definitions.get(key, {}).get("label") or key).strip()
+
+
+def to_sheet(df, definitions, stage_columns):
+    """Order the columns by COLUMN_GROUPS and head them with labels. Close
+    Date Source is written as the label of the field used, so the row says
+    "Date - Settled" rather than an internal name."""
+    df = df[column_order(list(df.columns), stage_columns)].copy()
+    if "close_date_source" in df.columns:
+        df["close_date_source"] = df["close_date_source"].map(
+            lambda k: header_for(k, definitions) if k else None)
+    df.columns = unique_headers([(header_for(c, definitions), c) for c in df.columns])
     return df
 
 
@@ -543,7 +603,7 @@ def check_destination(token):
         fail(f"SharePoint file check: {r.status_code} — {r.text}")
 
 
-def upload(workbook_bytes, token):
+def upload(workbook_bytes, token, expected_size):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{FILE_PATH}:/content"
     r = request_with_retry(
         "PUT", url,
@@ -556,6 +616,13 @@ def upload(workbook_bytes, token):
     )
     if r.status_code not in (200, 201):
         fail(f"upload: {r.status_code} — {r.text}")
+    # Graph answers with the stored file. Its size must be the workbook just
+    # built: anything else means SharePoint kept something other than this
+    # run's data, and the run fails rather than reporting a refresh that did
+    # not land.
+    stored = (r.json() or {}).get("size")
+    if stored != expected_size:
+        fail(f"upload: SharePoint stored {stored} bytes, expected {expected_size}")
     return r.status_code
 
 
@@ -563,17 +630,13 @@ def upload(workbook_bytes, token):
 # WORKBOOK
 # ======================================================
 def add_stage_attributes(df, stages):
-    """Put the stage's pipeline order and closed flag on every row, right
-    after Deal Stage, so the funnel can be sorted without a lookup table."""
+    """The stage's pipeline order and closed flag on every row, so the funnel
+    can be sorted and filtered without a lookup table."""
     info = {s["id"]: s for s in stages}
-    ids = df["Deal Stage ID"]
-    # Positioned off "Deal Stage ID", which this script names, not off the
-    # stage column whose header is HubSpot's label and could be renamed.
-    at = df.columns.get_loc("Deal Stage ID") + 2
-    df.insert(at, "Deal Stage Order",
-              ids.map(lambda i: info[i].get("displayOrder") if i in info else None))
-    df.insert(at + 1, "Deal Stage Is Closed",
-              ids.map(lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None))
+    ids = df["dealstage__id"]
+    df["dealstage__order"] = ids.map(lambda i: info[i].get("displayOrder") if i in info else None)
+    df["dealstage__closed"] = ids.map(
+        lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None)
     return df
 
 
@@ -619,7 +682,7 @@ def check_closed_stages(stages):
 
 
 def add_close_date(df, deals, stages):
-    """Close Date and Close Date Source, right after Deal Stage Is Closed.
+    """Close Date and Close Date Source for every row.
 
     Relies on df having one row per deal in the order of `deals`, which is
     how build_deals_frame builds it.
@@ -633,9 +696,8 @@ def add_close_date(df, deals, stages):
         d, src = close_date_for(p, stage.get("label", ""), closed)
         dates.append(d)
         sources.append(src)
-    at = df.columns.get_loc("Deal Stage Is Closed") + 1
-    df.insert(at, "Close Date", dates)
-    df.insert(at + 1, "Close Date Source", sources)
+    df["close_date"] = dates
+    df["close_date_source"] = sources
     return df
 
 
@@ -719,7 +781,8 @@ def main():
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
-    df_deals["Last Refresh"] = refreshed
+    df_deals["last_refresh"] = refreshed
+    df_deals = to_sheet(df_deals, definitions, stage_columns)
 
     workbook = build_workbook(df_deals)
     size_kb = len(workbook) / 1024
@@ -751,7 +814,7 @@ def main():
             print(f"    {n:>6}  {col}")
         return
 
-    status = upload(workbook, token)
+    status = upload(workbook, token, len(workbook))
     print(f"File {'created' if status == 201 else 'uploaded'} ({size_kb:.1f} KB): {FILE_PATH}")
     print(f"Rows written: {len(df_deals)} x {len(df_deals.columns)} columns")
     print(f"Last Refresh: {refreshed:%B %d, %Y at %I:%M %p} Pacific")

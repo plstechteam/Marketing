@@ -47,60 +47,11 @@ def test_datetime_goes_to_bogota():
     assert main.parse_hubspot_date("2026-02-03") == date(2026, 2, 3)
 
 
-def test_build_deals_frame_headers_and_lookups():
-    props = ["hs_object_id", "dealname", "pipeline", "dealstage", "hubspot_owner_id",
-             "createdate", "lead___source", "ro_review__final_decision_",
-             "hs_v2_date_entered_5411633"]
-    defs = {
-        "dealname": {"label": "Deal Name", "type": "string"},
-        "pipeline": {"label": "Pipeline", "type": "enumeration"},
-        "dealstage": {"label": "Deal Stage", "type": "enumeration"},
-        "createdate": {"label": "Create Date", "type": "datetime"},
-        "lead___source": {"label": "Lead - Source", "type": "enumeration",
-                          "options": [{"value": "VDS", "label": "Agency"}]},
-        "ro_review__final_decision_": {"label": "RO Review (Final Decision)", "type": "enumeration",
-                                       "options": [{"value": "Sign Up - Pre-Lit (OPT IN OEM)",
-                                                    "label": "Pre-Lit (OPT IN OEM)"}]},
-        "hs_v2_date_entered_5411633": {"label": 'Date entered "Intake (Lemon Law)"', "type": "datetime"},
-    }
-    deals = [{"id": "1", "properties": {
-        "hs_object_id": "1", "dealname": "Doe, Jane", "pipeline": "default", "dealstage": "5411633",
-        "hubspot_owner_id": "77", "createdate": "2026-03-01T12:00:00Z", "lead___source": "VDS",
-        "ro_review__final_decision_": "Sign Up - Pre-Lit (OPT IN OEM)",
-        "hs_v2_date_entered_5411633": None}}]
-    df = main.build_deals_frame(deals, props, defs, {"5411633": "Intake"}, {"77": "Ann Lee"}, "Lemon Law")
-    assert list(df.columns) == [
-        "Record ID", "Deal Name", "Pipeline", "Deal Stage ID", "Deal Stage", "Deal Owner ID",
-        "Deal Owner", "Create Date", "Lead - Source", "RO Review (Final Decision)",
-        'Date entered "Intake (Lemon Law)"']
-    row = df.iloc[0]
-    assert row["Pipeline"] == "Lemon Law"
-    assert row["Deal Stage ID"] == "5411633" and row["Deal Stage"] == "Intake"
-    assert row["Deal Owner ID"] == "77" and row["Deal Owner"] == "Ann Lee"
-    assert row["Lead - Source"] == "Agency"
-    assert row["RO Review (Final Decision)"] == "Pre-Lit (OPT IN OEM)"
-    assert row["Create Date"] == datetime(2026, 3, 1, 7, 0)
-
-
 def test_stage_date_properties_falls_back_to_exited_then_skips():
     defs = {"hs_v2_date_entered_1": {}, "hs_v2_date_exited_1": {}, "hs_v2_date_exited_2": {}}
     cols, skipped = main.stage_date_properties(["1", "2", "3"], defs)
     assert cols == ["hs_v2_date_entered_1", "hs_v2_date_exited_2"]
     assert skipped == ["3"]
-
-
-def test_add_stage_attributes_puts_order_and_closed_on_each_row():
-    import pandas as pd
-    df = pd.DataFrame({"Record ID": ["1", "2", "3"], "Deal Stage ID": ["a", "b", "zz"],
-                       "Deal Stage": ["Intake", "Settled", "zz"], "X": [1, 2, 3]})
-    stages = [{"id": "a", "label": "Intake", "displayOrder": 0},
-              {"id": "b", "label": "Close Out", "displayOrder": 9}]
-    out = main.add_stage_attributes(df, stages)
-    assert list(out.columns) == ["Record ID", "Deal Stage ID", "Deal Stage",
-                                 "Deal Stage Order", "Deal Stage Is Closed", "X"]
-    assert out["Deal Stage Order"].tolist()[:2] == [0, 9]
-    assert out["Deal Stage Is Closed"].tolist()[:2] == [False, True]
-    assert pd.isna(out["Deal Stage Order"].iloc[2])
 
 
 def test_close_date_for_picks_the_field_that_matches_how_it_closed():
@@ -152,15 +103,67 @@ def test_ab1755_maps_stored_manufacturer_values():
     assert not (main.AB1755_OPT_IN & main.AB1755_OPT_OUT)
 
 
-def test_manufacturer_column_is_followed_by_ab1755():
-    props = ["hs_object_id", "s__manufacturer", "dealname"]
-    defs = {"s__manufacturer": {"label": "Manufacturer", "type": "enumeration",
-                                "options": [{"value": "Polestar", "label": "POLESTAR AUTOMOTIVE USA, INC."}]}}
-    deals = [{"id": "1", "properties": {"hs_object_id": "1", "s__manufacturer": "Polestar", "dealname": "x"}}]
-    df = main.build_deals_frame(deals, props, defs, {}, {}, "Lemon Law")
-    assert list(df.columns) == ["Record ID", "Manufacturer", main.AB1755_HEADER, "dealname"]
-    assert df.iloc[0]["Manufacturer"] == "POLESTAR AUTOMOTIVE USA, INC."
-    assert df.iloc[0][main.AB1755_HEADER] == "Opt Out"
+def test_sheet_lookups_order_and_headers():
+    props = ["hs_object_id", "dealname", "pipeline", "dealstage", "hubspot_owner_id",
+             "createdate", "lead___source", "s__manufacturer", "ro_review__final_decision_",
+             "hs_v2_date_entered_5411633", "some_new_property"]
+    defs = {
+        "dealname": {"label": "Deal Name", "type": "string"},
+        "pipeline": {"label": "Pipeline", "type": "enumeration"},
+        "dealstage": {"label": "Deal Stage", "type": "enumeration"},
+        "createdate": {"label": "Create Date", "type": "datetime"},
+        "lead___source": {"label": "Lead - Source", "type": "enumeration",
+                          "options": [{"value": "VDS", "label": "Agency"}]},
+        "s__manufacturer": {"label": "Manufacturer", "type": "enumeration",
+                            "options": [{"value": "Polestar", "label": "POLESTAR AUTOMOTIVE USA, INC."}]},
+        "ro_review__final_decision_": {"label": "RO Review (Final Decision)", "type": "enumeration",
+                                       "options": [{"value": "Sign Up - Pre-Lit (OPT IN OEM)",
+                                                    "label": "Pre-Lit (OPT IN OEM)"}]},
+        "hs_v2_date_entered_5411633": {"label": 'Date entered "Intake (Lemon Law)"', "type": "datetime"},
+        "some_new_property": {"label": "Some New Property", "type": "string"},
+        "date___dropped": {"label": "Date - Closed Out", "type": "date"},
+    }
+    deals = [{"id": "1", "properties": {
+        "hs_object_id": "1", "dealname": "Doe, Jane", "pipeline": "default", "dealstage": "5411635",
+        "hubspot_owner_id": "77", "createdate": "2026-03-01T12:00:00Z", "lead___source": "VDS",
+        "s__manufacturer": "Polestar", "ro_review__final_decision_": "Sign Up - Pre-Lit (OPT IN OEM)",
+        "hs_v2_date_entered_5411633": None, "some_new_property": "x", "date___dropped": "2026-03-05"}}]
+    stages = [{"id": "5411633", "label": "Intake", "displayOrder": 0},
+              {"id": "5411635", "label": "Close Out", "displayOrder": 12}]
+    df = main.build_deals_frame(deals, props, defs, {s["id"]: s["label"] for s in stages},
+                                {"77": "Ann Lee"}, "Lemon Law")
+    df = main.add_stage_attributes(df, stages)
+    df = main.add_close_date(df, deals, stages)
+    df["last_refresh"] = datetime(2026, 9, 23)
+    sheet = main.to_sheet(df, defs, ["hs_v2_date_entered_5411633"])
+    assert list(sheet.columns) == [
+        "Record ID", "Deal Name", "Create Date",
+        "Deal Stage", "Deal Stage ID", "Deal Stage Order", "Deal Stage Is Closed",
+        "Close Date", "Close Date Source",
+        "Lead - Source",
+        "Manufacturer", main.AB1755_HEADER, "RO Review (Final Decision)",
+        "Deal Owner", "Deal Owner ID",
+        'Date entered "Intake (Lemon Law)"',
+        "Some New Property",                  # unplaced property: kept, before Audit
+        "Pipeline", "Last Refresh"]
+    row = sheet.iloc[0]
+    assert row["Pipeline"] == "Lemon Law"
+    assert row["Deal Stage"] == "Close Out" and row["Deal Stage ID"] == "5411635"
+    assert row["Deal Stage Order"] == 12 and row["Deal Stage Is Closed"] == True  # noqa: E712
+    assert row["Close Date"] == date(2026, 3, 5)
+    assert row["Close Date Source"] == "Date - Closed Out"   # label, not internal name
+    assert row["Deal Owner"] == "Ann Lee" and row["Deal Owner ID"] == "77"
+    assert row["Lead - Source"] == "Agency"
+    assert row["Manufacturer"] == "POLESTAR AUTOMOTIVE USA, INC."
+    assert row[main.AB1755_HEADER] == "Opt Out"
+    assert row["Create Date"] == datetime(2026, 3, 1, 7, 0)
+
+
+def test_every_base_property_has_a_place_in_the_layout():
+    placed = {k for _, keys in main.COLUMN_GROUPS for k in keys}
+    unplaced = [p for p in main.BASE_PROPERTIES if p not in placed]
+    assert not unplaced, f"add to COLUMN_GROUPS: {unplaced}"
+    assert set(main.FIXED_HEADERS) <= placed
 
 
 def test_unique_headers():
