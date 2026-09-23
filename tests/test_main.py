@@ -41,8 +41,10 @@ def test_label_value_maps_single_and_multi_and_keeps_unknown():
     assert main.label_value("12", people, {"99": "Old Owner"}) == "12"
 
 
-def test_datetime_goes_to_bogota():
-    assert main.parse_hubspot_datetime("2026-01-01T03:00:00.000Z") == datetime(2025, 12, 31, 22, 0)
+def test_datetime_goes_to_california():
+    # PST in winter, PDT in summer.
+    assert main.parse_hubspot_datetime("2026-01-01T03:00:00.000Z") == datetime(2025, 12, 31, 19, 0)
+    assert main.parse_hubspot_datetime("2026-07-01T03:00:00.000Z") == datetime(2026, 6, 30, 20, 0)
     assert main.parse_hubspot_datetime(None) is None
     assert main.parse_hubspot_date("2026-02-03") == date(2026, 2, 3)
 
@@ -156,7 +158,7 @@ def test_sheet_lookups_order_and_headers():
     assert row["Lead - Source"] == "Agency"
     assert row["Manufacturer"] == "POLESTAR AUTOMOTIVE USA, INC."
     assert row[main.AB1755_HEADER] == "Opt Out"
-    assert row["Create Date"] == datetime(2026, 3, 1, 7, 0)
+    assert row["Create Date"] == datetime(2026, 3, 1, 4, 0)   # 12:00 UTC = 4 AM PST
 
 
 def test_every_base_property_has_a_place_in_the_layout():
@@ -188,6 +190,29 @@ def test_durations_are_calendar_days_and_blank_when_a_date_is_missing():
 def test_headers_are_english_ascii():
     for header in main.FIXED_HEADERS.values():
         assert header.isascii(), header
+
+
+def test_workbook_round_trips_every_type():
+    import io
+    import openpyxl
+    import pandas as pd
+    df = pd.DataFrame({
+        "Text": ["=1+1", None],
+        "When": [datetime(2026, 3, 1, 4, 5, 6), None],
+        "Day": [date(2026, 3, 5), None],
+        "Count": pd.array([7, None], dtype="Int64"),
+        "Fee": [5500.5, None],
+        "Closed": [True, False],
+    })
+    ws = openpyxl.load_workbook(io.BytesIO(main.build_workbook(df))).active
+    assert ws.title == "Deals"
+    assert [c.value for c in ws[1]] == list(df.columns)
+    first = [c.value for c in ws[2]]
+    assert first[0] == "=1+1" and ws["A2"].data_type == "s"   # text, not a formula
+    assert first[1] == datetime(2026, 3, 1, 4, 5, 6)
+    assert first[2] == datetime(2026, 3, 5)
+    assert first[3] == 7 and first[4] == 5500.5 and first[5] is True
+    assert [c.value for c in ws[3]] == [None, None, None, None, None, False]
 
 
 def test_unique_headers():

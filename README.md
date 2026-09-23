@@ -11,7 +11,7 @@ marketing funnel.
 Power BI. The exceptions are per-deal values: the Close Date, the AB 1755
 side and the four cycle times, all recomputed on every run. The script only does lookups — stage id → name, owner
 id → name, dropdown value → the label HubSpot shows — and converts dates to
-`America/Bogota`, as the Settlement report does.
+California time (`America/Los_Angeles`).
 
 ## How it runs
 
@@ -114,8 +114,8 @@ still comes out, just before Audit — and a test fails until it is placed.
   dates in HubSpot are out of order — and the dry run counts them. Recomputed
   from scratch every run, so a corrected date corrects its duration.
 - All headers are in English.
-- Fees and cycle times are written as numbers; dates in Bogota time; Last
-  Refresh in Pacific.
+- Fees and cycle times are written as numbers; every date and time,
+  Last Refresh included, in California time.
 
 **Left out because HubSpot never fills them** on this year's Lemon Law deals
 (measured on all 18,111 in September 2026): Close Date, Intake Outcome, Class
@@ -126,6 +126,28 @@ A dry run prints how many rows have a value in each column, the Close Date
 sources and the AB 1755 split (counts only).
 
 Size: ~18,000 rows and ~5 MB in September 2026, ~7 MB by year end.
+
+## Run time
+
+A run takes about a minute end to end, measured in September 2026 on
+~18,000 deals:
+
+| Step | Time |
+|---|---|
+| Runner setup (Python, cached dependencies, tests) | ~13s |
+| HubSpot pull, 9 monthly windows, ~90 requests | ~30s |
+| Building the workbook (xlsxwriter, row by row) | ~6s |
+| Graph token + upload | ~2s |
+
+The log prints the pull and build times on every run. The workbook used to
+take ~25s with pandas + openpyxl; xlsxwriter cut it to ~6s and the file
+shrank. The pull is bound by HubSpot's search rate limit (a few requests a
+second, shared with the Settlement job), so it grows with the year —
+roughly 1.5s per 1,000 deals.
+
+A full rewrite is kept on purpose rather than updating only changed deals:
+at this size it costs seconds, and it is what guarantees the file matches
+HubSpot exactly on every run.
 
 ## Every run is a full refresh
 
