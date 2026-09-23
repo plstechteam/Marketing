@@ -49,23 +49,48 @@ The first real run creates the file; later runs overwrite it.
 
 ## The workbook
 
-| Sheet | Contents |
-|---|---|
-| `Deals` | One row per deal. Headers are HubSpot's property labels |
-| `Stages` | Every Lemon Law stage: id, name, display order, closed flag |
-| `Owners` | Every owner, active and archived: id, name, email |
+**One sheet, `Deals`, one row per Lemon Law deal created this year — every
+one of them — and every row stands on its own** —
+no lookup tabs. Stage and owner come as names with their IDs beside them, and
+the stage's pipeline order and closed flag are on the row. Headers are
+HubSpot's property labels.
 
-`Deals` columns:
+Columns:
 
-- Record ID, Deal Name, Pipeline, Deal Stage ID, Deal Stage, Deal Owner ID, Deal Owner
-- Create Date, Close Date, Last Modified Date, Date entered current stage
-- Lead - Source, Lead - Source (Group), Original Traffic Source, Record source
+- Record ID, Deal Name, Pipeline
+- Deal Stage ID, Deal Stage, **Deal Stage Order** (pipeline order, for sorting
+  the funnel), **Deal Stage Is Closed** — true for the three Settled stages,
+  Close Out, Retained - Drop Client and Retained - Client Dropped
+  (`CLOSED_STAGE_LABELS` in `main.py`). HubSpot's own closed flag is not used:
+  it marks only the Settled stages, so Close Out would read as open. A closed
+  label missing from the pipeline stops the run
+- **Close Date**, **Close Date Source** — filled for every closed deal, blank
+  for open ones. HubSpot's own Close Date is never
+  set in this pipeline, so it comes from the firm's fields: **Date - Settled**
+  for the Settled stages, **Date - Closed Out** (then Date - Close Out After
+  Retained) for the rest, and the date the deal entered its current stage when
+  that field is blank. Close Date Source names the field used
+- Deal Owner ID, Deal Owner
+- **Intake - Case Supervisor**, **Senior Case Supervisor**, **Legal - Handling
+  Attorney**, **Settlement Attorney** — names; archived people resolve through
+  the owner list
+- Create Date, Last Modified Date, Date entered current stage
+- **Case Category** (Lit / Pre-Lit), **Date - Settled**, Date - Closed Out,
+  Date - Close Out After Retained
+- Lead - Source, Lead - Source (Group), Original Traffic Source, Original
+  Traffic Source Drill-Down 1, Record source
+- **Channel detail** — what splits Prospect by channel, since Lead - Source
+  (Group) has no calls or forms bucket:
+  - AirCall Entry Number — inbound call, and the line it came in on
+  - Auto Dialer Call Type — outbound auto-dialer (Crexendo) call
+  - TF: UTM Source / Medium / Campaign — the Typeform (web form) UTMs
+  - GCLID — Google Ads click (PPC)
 - **Close Out Reason** (`drop_reason`) — the detail for Closed Lost
 - **RO Review (Final Decision)** (`ro_review__final_decision_`) — the opt-in /
   opt-out split: `Lit - Opt In`, `Lit - Opt Out`, `Pre-Lit (OPT IN OEM)`,
   `Pre-Lit (OPT OUT OEM)`, plus the non-opt values (`Sign Up - Pre-Lit`,
   `Sign Up - Lit (AB1755)`, `Sign Up - Pre-Lit (GM)`, …)
-- Legal Sub Phase, Intake Outcome, Class Action, Lemon Law - State
+- Legal Sub Phase, Lemon Law - State
 - **Date entered "<stage>"** — one column per stage of the pipeline, built
   from the pipeline at run time so a new stage gets its column without a code
   change. HubSpot has no "date entered" property for four stages: **HOLD**
@@ -75,7 +100,15 @@ The first real run creates the file; later runs overwrite it.
   stage says since when
 - Last Refresh (Pacific)
 
-Size: ~18,000 rows and ~3.5 MB in September 2026, ~5 MB by year end.
+A dry run prints how many rows have a value in each column (counts only).
+
+**Left out because HubSpot never fills them** on this year's Lemon Law deals
+(measured on all 18,111 in September 2026): Close Date, Intake Outcome, Class
+Action, the deal-level utm_source / utm_medium / utm_campaign, Lead Generation
+Form and Form ID. HubSpot's own Close Date is blank on every Lemon Law deal —
+the sheet's Close Date above replaces it.
+
+Size: ~18,000 rows and ~3.5–4 MB in September 2026, ~5–6 MB by year end.
 
 ## Failure behaviour
 

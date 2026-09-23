@@ -37,9 +37,10 @@ PACIFIC = pytz.timezone("America/Los_Angeles")
 # the two workbooks agree on which day a deal belongs to.
 DEAL_TZ = pytz.timezone("America/Bogota")
 
-DEALS_SHEET  = "Deals"
-STAGES_SHEET = "Stages"
-OWNERS_SHEET = "Owners"
+# One sheet, and every row stands on its own: stage and owner come as names
+# (with their IDs beside them), and the stage's order and closed flag ride on
+# the row, so Power BI needs no lookup table to read or sort a deal.
+DEALS_SHEET = "Deals"
 
 # The deal columns, in sheet order. Headers come from HubSpot's own labels.
 # The "Date entered <stage>" columns are not listed here: they are built from
@@ -51,21 +52,62 @@ BASE_PROPERTIES = [
     "pipeline",
     "dealstage",
     "hubspot_owner_id",
+    # People on the case. HubSpot stores these as dropdowns whose values are
+    # owner ids; they go out as names (see label_value's fallback).
+    "n5__retainer_representative",  # Intake - Case Supervisor
+    "senior_case_supervisor",       # Senior Case Supervisor
+    "handling_attorney",            # Legal - Handling Attorney
+    "supervising_attorney",         # Settlement Attorney
     "createdate",
-    "closedate",
     "hs_lastmodifieddate",
     "hs_v2_date_entered_current_stage",
+    "case_category",                # Lit / Pre-Lit
+    "date___settled",               # Date - Settled — confirms the settlement
+    "date___dropped",               # Date - Closed Out
+    "date__intake_sign_up_close_out",   # Date - Close Out After Retained
     "lead___source",
     "lead___source__group_",
     "hs_analytics_source",
+    "hs_analytics_source_data_1",
     "hs_object_source_label",
+    # Channel detail. Lead - Source (Group) has no calls or forms bucket, so
+    # these are what split Prospect into inbound call / outbound call /
+    # website form / PPC / social.
+    "aircall_entry_number",         # inbound call — the Aircall line it came in on
+    "auto_dialer_call_type",        # outbound auto-dialer (Crexendo) call type
+    "tf__utm_source",               # Typeform UTMs — the deal-level utm_* are unused
+    "tf__utm_medium",
+    "tf__utm_campaign",
+    "gclid",                        # Google Ads click id — PPC
     "drop_reason",                  # Close Out Reason — detail for Closed Lost
     "ro_review__final_decision_",   # Opt In / Opt Out split
     "deal_stage___sub_phase",
-    "intake_outcome",
-    "class_action",
     "legal_pipeline",
 ]
+# Left out on purpose, measured on every 2026 Lemon Law deal (18,111) in
+# September 2026: closedate, intake_outcome, class_action, utm_source,
+# utm_medium, utm_campaign, lead_generation_form and hs_form_id were blank on
+# every one. HubSpot's own closedate is blank on every Lemon Law deal ever
+# (none of the 231,000+), which is why the sheet's Close Date is taken from
+# the firm's own date fields instead — see close_date_for. Add a property back
+# here if it starts being used.
+
+# The stages where a case is over, by label. HubSpot's own "closed" flag
+# cannot be used: it marks only the three Settled stages, so Close Out — where
+# 93% of this year's deals end — would read as open and carry no close date.
+# Labels, not ids, as in the Settlement repo: ids are opaque, and a renamed
+# stage should fail loudly (see check_closed_stages) rather than be silently
+# reclassified. This is the one place to change the definition.
+CLOSED_STAGE_LABELS = {
+    # won
+    "Settled - Lit",
+    "Settled - Pre Lit",
+    "Settled - Referred Out",
+    # lost
+    "Close Out",
+    "Retained - Drop Client",
+    "Retained - Client Dropped",
+}
 
 # Search stops paging at 10,000 results with no error — it simply stops
 # returning `after`. The year is well past that, so it is pulled a calendar
@@ -166,17 +208,20 @@ def option_labels(definition):
     return {o["value"]: o["label"] for o in definition.get("options") or []}
 
 
-def label_value(raw, labels):
+def label_value(raw, labels, fallback=None):
     """Map an enumeration's stored value(s) to what HubSpot's UI shows.
 
-    Multi-select values arrive ';'-joined. A value with no option (an option
-    since deleted) is kept as stored rather than blanked.
+    Multi-select values arrive ';'-joined. A value with no option is looked up
+    in `fallback` — the owner map, because the people dropdowns (case
+    supervisor, attorneys) store owner ids and drop the option when someone
+    is archived — and otherwise kept as stored rather than blanked.
     """
     if raw is None or raw == "":
         return None
-    if not labels:
+    fallback = fallback or {}
+    if not labels and not fallback:
         return raw
-    return ";".join(labels.get(v, v) for v in str(raw).split(";"))
+    return ";".join(labels.get(v) or fallback.get(v, v) for v in str(raw).split(";"))
 
 
 def parse_hubspot_datetime(raw):
@@ -254,14 +299,14 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
             elif d.get("type") == "date":
                 row[name] = parse_hubspot_date(raw)
             elif d.get("type") == "enumeration":
-                row[name] = label_value(raw, option_labels(d))
+                row[name] = label_value(raw, option_labels(d), owners)
             else:
                 row[name] = raw if raw != "" else None
         records.append(row)
 
     columns = []
     for name in properties:
-        label = definitions.get(name, {}).get("label") or name
+        label = (definitions.get(name, {}).get("label") or name).strip()
         if name == "dealstage":
             columns.append(("dealstage__id", "Deal Stage ID"))
         if name == "hubspot_owner_id":
@@ -435,14 +480,86 @@ def upload(workbook_bytes, token):
 # ======================================================
 # WORKBOOK
 # ======================================================
-def build_workbook(df_deals, df_stages, df_owners):
+def add_stage_attributes(df, stages):
+    """Put the stage's pipeline order and closed flag on every row, right
+    after Deal Stage, so the funnel can be sorted without a lookup table."""
+    info = {s["id"]: s for s in stages}
+    ids = df["Deal Stage ID"]
+    # Positioned off "Deal Stage ID", which this script names, not off the
+    # stage column whose header is HubSpot's label and could be renamed.
+    at = df.columns.get_loc("Deal Stage ID") + 2
+    df.insert(at, "Deal Stage Order",
+              ids.map(lambda i: info[i].get("displayOrder") if i in info else None))
+    df.insert(at + 1, "Deal Stage Is Closed",
+              ids.map(lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None))
+    return df
+
+
+def close_date_for(props, stage_label, is_closed):
+    """(Close Date, where it came from) for one deal; (None, None) if open.
+
+    HubSpot never sets closedate in this pipeline, so a closed deal is dated
+    from the firm's own fields, the one that matches how it closed:
+
+      Settled stages   Date - Settled, the date that confirms the settlement
+      any other closed Date - Closed Out, then Date - Close Out After Retained
+
+    and, for a closed deal whose field is blank, the day it entered its
+    current stage — HubSpot stamps that on every move, so a closed row is
+    never left without a date. The second column names the field used, so a
+    row dated by the fallback can be told apart from one dated by the firm.
+    """
+    if not is_closed:
+        return None, None
+    if stage_label.lower().startswith("settled"):
+        preferred = ["date___settled"]
+    else:
+        preferred = ["date___dropped", "date__intake_sign_up_close_out"]
+    for name in preferred:
+        if props.get(name):
+            return parse_hubspot_date(props[name]), name
+    entered = parse_hubspot_datetime(props.get("hs_v2_date_entered_current_stage"))
+    if entered:
+        return entered.date(), "hs_v2_date_entered_current_stage"
+    return None, None
+
+
+def check_closed_stages(stages):
+    """Every closed label must still exist in the pipeline, or the run stops:
+    a renamed stage would otherwise quietly become "open" and lose its dates."""
+    missing = CLOSED_STAGE_LABELS - {s["label"] for s in stages}
+    if missing:
+        fail(f"closed stage(s) not in the pipeline any more: {', '.join(sorted(missing))} "
+             "— update CLOSED_STAGE_LABELS in main.py.")
+
+
+def add_close_date(df, deals, stages):
+    """Close Date and Close Date Source, right after Deal Stage Is Closed.
+
+    Relies on df having one row per deal in the order of `deals`, which is
+    how build_deals_frame builds it.
+    """
+    info = {s["id"]: s for s in stages}
+    dates, sources = [], []
+    for deal in deals:
+        p = deal.get("properties", {})
+        stage = info.get(p.get("dealstage"), {})
+        closed = stage.get("label") in CLOSED_STAGE_LABELS
+        d, src = close_date_for(p, stage.get("label", ""), closed)
+        dates.append(d)
+        sources.append(src)
+    at = df.columns.get_loc("Deal Stage Is Closed") + 1
+    df.insert(at, "Close Date", dates)
+    df.insert(at + 1, "Close Date Source", sources)
+    return df
+
+
+def build_workbook(df_deals):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl",
                         datetime_format="yyyy-mm-dd hh:mm:ss",
                         date_format="yyyy-mm-dd") as writer:
         df_deals.to_excel(writer, sheet_name=DEALS_SHEET, index=False)
-        df_stages.to_excel(writer, sheet_name=STAGES_SHEET, index=False)
-        df_owners.to_excel(writer, sheet_name=OWNERS_SHEET, index=False)
     return buf.getvalue()
 
 
@@ -476,6 +593,7 @@ def main():
 
     pipeline_label, stages = fetch_pipeline(hs_headers)
     print(f"Pipeline '{pipeline_label}': {len(stages)} stages")
+    check_closed_stages(stages)
     stage_labels = {s["id"]: s["label"] for s in stages}
     stage_candidates = [f"hs_v2_date_{kind}_{s['id']}"
                         for s in stages for kind in ("entered", "exited")]
@@ -494,26 +612,27 @@ def main():
     if not deals:
         fail("HubSpot returned no deals — refusing to write an empty report.")
 
+    # One row per deal created this year, every one dated. The windows already
+    # guarantee it; checking the rows themselves means a filter that ever
+    # stops meaning what we think fails here instead of shipping.
+    created = [parse_hubspot_datetime(d.get("properties", {}).get("createdate")) for d in deals]
+    undated = sum(c is None for c in created)
+    outside = sum(c is not None and not (year_start.replace(tzinfo=None) <= c <= now_deal_tz.replace(tzinfo=None))
+                  for c in created)
+    if undated or outside:
+        fail(f"{undated} deals without a create date and {outside} created outside "
+             f"{year_start:%Y-%m-%d} to now — nothing written.")
+    print(f"Every deal created {year_start:%Y-%m-%d} or later, all {len(deals)} dated")
+
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,
                                  owner_names, pipeline_label)
+    df_deals = add_stage_attributes(df_deals, stages)
+    df_deals = add_close_date(df_deals, deals, stages)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
     df_deals["Last Refresh"] = refreshed
 
-    df_stages = pd.DataFrame([{
-        "Deal Stage ID": s["id"],
-        "Deal Stage": s["label"],
-        "Display Order": s.get("displayOrder"),
-        "Is Closed": (s.get("metadata") or {}).get("isClosed"),
-        "Probability": (s.get("metadata") or {}).get("probability"),
-        "Pipeline": pipeline_label,
-    } for s in stages])
-
-    df_owners = pd.DataFrame([{
-        "Deal Owner ID": k, "Deal Owner": v["name"], "Email": v["email"], "Archived": v["archived"],
-    } for k, v in sorted(owners.items())])
-
-    workbook = build_workbook(df_deals, df_stages, df_owners)
+    workbook = build_workbook(df_deals)
     size_kb = len(workbook) / 1024
 
     token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
@@ -525,8 +644,19 @@ def main():
         check_destination(token)
         # Counts only — deal names are client data and must not reach CI logs.
         print(f"DRY RUN: would upload {size_kb:.1f} KB to {FILE_PATH}")
-        print(f"DRY RUN: {DEALS_SHEET} {len(df_deals)} rows x {len(df_deals.columns)} columns, "
-              f"{STAGES_SHEET} {len(df_stages)}, {OWNERS_SHEET} {len(df_owners)}")
+        print(f"DRY RUN: one sheet '{DEALS_SHEET}', {len(df_deals)} rows x {len(df_deals.columns)} columns")
+        # Fill rate per column — counts, no client data — so a dry run shows
+        # which columns HubSpot actually populates.
+        filled = df_deals.notna().sum()
+        closed = df_deals["Deal Stage Is Closed"] == True  # noqa: E712
+
+        print(f"DRY RUN: closed deals {int(closed.sum())}, with Close Date "
+              f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
+        for src, n in df_deals.loc[closed, "Close Date Source"].value_counts(dropna=False).items():
+            print(f"    {n:>6}  {src}")
+        print("DRY RUN: rows with a value, per column:")
+        for col, n in filled.items():
+            print(f"    {n:>6}  {col}")
         return
 
     status = upload(workbook, token)

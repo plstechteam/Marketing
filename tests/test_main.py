@@ -34,6 +34,11 @@ def test_label_value_maps_single_and_multi_and_keeps_unknown():
     assert main.label_value("Gone", labels) == "Gone"
     assert main.label_value("", labels) is None
     assert main.label_value(None, labels) is None
+    # People dropdowns: an archived owner has no option but is in the owner map.
+    people = {"77": "Ann Lee"}
+    assert main.label_value("77", people, {"99": "Old Owner"}) == "Ann Lee"
+    assert main.label_value("99", people, {"99": "Old Owner"}) == "Old Owner"
+    assert main.label_value("12", people, {"99": "Old Owner"}) == "12"
 
 
 def test_datetime_goes_to_bogota():
@@ -82,6 +87,50 @@ def test_stage_date_properties_falls_back_to_exited_then_skips():
     cols, skipped = main.stage_date_properties(["1", "2", "3"], defs)
     assert cols == ["hs_v2_date_entered_1", "hs_v2_date_exited_2"]
     assert skipped == ["3"]
+
+
+def test_add_stage_attributes_puts_order_and_closed_on_each_row():
+    import pandas as pd
+    df = pd.DataFrame({"Record ID": ["1", "2", "3"], "Deal Stage ID": ["a", "b", "zz"],
+                       "Deal Stage": ["Intake", "Settled", "zz"], "X": [1, 2, 3]})
+    stages = [{"id": "a", "label": "Intake", "displayOrder": 0},
+              {"id": "b", "label": "Close Out", "displayOrder": 9}]
+    out = main.add_stage_attributes(df, stages)
+    assert list(out.columns) == ["Record ID", "Deal Stage ID", "Deal Stage",
+                                 "Deal Stage Order", "Deal Stage Is Closed", "X"]
+    assert out["Deal Stage Order"].tolist()[:2] == [0, 9]
+    assert out["Deal Stage Is Closed"].tolist()[:2] == [False, True]
+    assert pd.isna(out["Deal Stage Order"].iloc[2])
+
+
+def test_close_date_for_picks_the_field_that_matches_how_it_closed():
+    from datetime import date
+    settled = {"date___settled": "2026-05-04", "date___dropped": "2026-01-01",
+               "hs_v2_date_entered_current_stage": "2026-06-01T12:00:00Z"}
+    assert main.close_date_for(settled, "Settled - Pre Lit", True) == (date(2026, 5, 4), "date___settled")
+    closed_out = {"date___dropped": "2026-02-03"}
+    assert main.close_date_for(closed_out, "Close Out", True) == (date(2026, 2, 3), "date___dropped")
+    after_retained = {"date__intake_sign_up_close_out": "2026-03-01"}
+    assert main.close_date_for(after_retained, "Retained - Client Dropped", True) == \
+        (date(2026, 3, 1), "date__intake_sign_up_close_out")
+    # Closed with the firm's field blank: never left undated.
+    bare = {"hs_v2_date_entered_current_stage": "2026-06-01T12:00:00Z"}
+    assert main.close_date_for(bare, "Settled - Lit", True) == \
+        (date(2026, 6, 1), "hs_v2_date_entered_current_stage")
+    # Open: no close date even when a date field happens to be filled.
+    assert main.close_date_for(settled, "Intake", False) == (None, None)
+
+
+def test_closed_stages_include_close_out_and_fail_when_renamed():
+    assert "Close Out" in main.CLOSED_STAGE_LABELS
+    everything = [{"label": l} for l in main.CLOSED_STAGE_LABELS]
+    main.check_closed_stages(everything)          # no exit
+    try:
+        main.check_closed_stages(everything[1:])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("a missing closed stage must stop the run")
 
 
 def test_unique_headers():
