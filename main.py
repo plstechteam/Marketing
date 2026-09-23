@@ -37,9 +37,10 @@ PACIFIC = pytz.timezone("America/Los_Angeles")
 # the two workbooks agree on which day a deal belongs to.
 DEAL_TZ = pytz.timezone("America/Bogota")
 
-DEALS_SHEET  = "Deals"
-STAGES_SHEET = "Stages"
-OWNERS_SHEET = "Owners"
+# One sheet, and every row stands on its own: stage and owner come as names
+# (with their IDs beside them), and the stage's order and closed flag ride on
+# the row, so Power BI needs no lookup table to read or sort a deal.
+DEALS_SHEET = "Deals"
 
 # The deal columns, in sheet order. Headers come from HubSpot's own labels.
 # The "Date entered <stage>" columns are not listed here: they are built from
@@ -58,7 +59,22 @@ BASE_PROPERTIES = [
     "lead___source",
     "lead___source__group_",
     "hs_analytics_source",
+    "hs_analytics_source_data_1",
     "hs_object_source_label",
+    # Channel detail. Lead - Source (Group) has no calls or forms bucket, so
+    # these are what split Prospect into inbound call / outbound call /
+    # website form / PPC / social.
+    "aircall_entry_number",         # inbound call — the Aircall line it came in on
+    "auto_dialer_call_type",        # outbound auto-dialer (Crexendo) call type
+    "lead_generation_form",         # Facebook Form / Typeform / HubSpot Form
+    "hs_form_id",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "tf__utm_source",
+    "tf__utm_medium",
+    "tf__utm_campaign",
+    "gclid",                        # Google Ads click id — PPC
     "drop_reason",                  # Close Out Reason — detail for Closed Lost
     "ro_review__final_decision_",   # Opt In / Opt Out split
     "deal_stage___sub_phase",
@@ -435,14 +451,28 @@ def upload(workbook_bytes, token):
 # ======================================================
 # WORKBOOK
 # ======================================================
-def build_workbook(df_deals, df_stages, df_owners):
+def add_stage_attributes(df, stages):
+    """Put the stage's pipeline order and closed flag on every row, right
+    after Deal Stage, so the funnel can be sorted without a lookup table."""
+    info = {s["id"]: s for s in stages}
+    ids = df["Deal Stage ID"]
+    # Positioned off "Deal Stage ID", which this script names, not off the
+    # stage column whose header is HubSpot's label and could be renamed.
+    at = df.columns.get_loc("Deal Stage ID") + 2
+    df.insert(at, "Deal Stage Order",
+              ids.map(lambda i: info[i].get("displayOrder") if i in info else None))
+    df.insert(at + 1, "Deal Stage Is Closed",
+              ids.map(lambda i: str((info[i].get("metadata") or {}).get("isClosed", "")).lower() == "true"
+                      if i in info else None))
+    return df
+
+
+def build_workbook(df_deals):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl",
                         datetime_format="yyyy-mm-dd hh:mm:ss",
                         date_format="yyyy-mm-dd") as writer:
         df_deals.to_excel(writer, sheet_name=DEALS_SHEET, index=False)
-        df_stages.to_excel(writer, sheet_name=STAGES_SHEET, index=False)
-        df_owners.to_excel(writer, sheet_name=OWNERS_SHEET, index=False)
     return buf.getvalue()
 
 
@@ -497,23 +527,11 @@ def main():
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,
                                  owner_names, pipeline_label)
+    df_deals = add_stage_attributes(df_deals, stages)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
     df_deals["Last Refresh"] = refreshed
 
-    df_stages = pd.DataFrame([{
-        "Deal Stage ID": s["id"],
-        "Deal Stage": s["label"],
-        "Display Order": s.get("displayOrder"),
-        "Is Closed": (s.get("metadata") or {}).get("isClosed"),
-        "Probability": (s.get("metadata") or {}).get("probability"),
-        "Pipeline": pipeline_label,
-    } for s in stages])
-
-    df_owners = pd.DataFrame([{
-        "Deal Owner ID": k, "Deal Owner": v["name"], "Email": v["email"], "Archived": v["archived"],
-    } for k, v in sorted(owners.items())])
-
-    workbook = build_workbook(df_deals, df_stages, df_owners)
+    workbook = build_workbook(df_deals)
     size_kb = len(workbook) / 1024
 
     token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
@@ -525,8 +543,13 @@ def main():
         check_destination(token)
         # Counts only — deal names are client data and must not reach CI logs.
         print(f"DRY RUN: would upload {size_kb:.1f} KB to {FILE_PATH}")
-        print(f"DRY RUN: {DEALS_SHEET} {len(df_deals)} rows x {len(df_deals.columns)} columns, "
-              f"{STAGES_SHEET} {len(df_stages)}, {OWNERS_SHEET} {len(df_owners)}")
+        print(f"DRY RUN: one sheet '{DEALS_SHEET}', {len(df_deals)} rows x {len(df_deals.columns)} columns")
+        # Fill rate per column — counts, no client data — so a dry run shows
+        # which columns HubSpot actually populates.
+        filled = df_deals.notna().sum()
+        print("DRY RUN: rows with a value, per column:")
+        for col, n in filled.items():
+            print(f"    {n:>6}  {col}")
         return
 
     status = upload(workbook, token)

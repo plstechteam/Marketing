@@ -84,6 +84,20 @@ def test_stage_date_properties_falls_back_to_exited_then_skips():
     assert skipped == ["3"]
 
 
+def test_add_stage_attributes_puts_order_and_closed_on_each_row():
+    import pandas as pd
+    df = pd.DataFrame({"Record ID": ["1", "2", "3"], "Deal Stage ID": ["a", "b", "zz"],
+                       "Deal Stage": ["Intake", "Settled", "zz"], "X": [1, 2, 3]})
+    stages = [{"id": "a", "displayOrder": 0, "metadata": {"isClosed": "false"}},
+              {"id": "b", "displayOrder": 9, "metadata": {"isClosed": "true"}}]
+    out = main.add_stage_attributes(df, stages)
+    assert list(out.columns) == ["Record ID", "Deal Stage ID", "Deal Stage",
+                                 "Deal Stage Order", "Deal Stage Is Closed", "X"]
+    assert out["Deal Stage Order"].tolist()[:2] == [0, 9]
+    assert out["Deal Stage Is Closed"].tolist()[:2] == [False, True]
+    assert pd.isna(out["Deal Stage Order"].iloc[2])
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]

@@ -49,17 +49,27 @@ The first real run creates the file; later runs overwrite it.
 
 ## The workbook
 
-| Sheet | Contents |
-|---|---|
-| `Deals` | One row per deal. Headers are HubSpot's property labels |
-| `Stages` | Every Lemon Law stage: id, name, display order, closed flag |
-| `Owners` | Every owner, active and archived: id, name, email |
+**One sheet, `Deals`, one row per deal, and every row stands on its own** —
+no lookup tabs. Stage and owner come as names with their IDs beside them, and
+the stage's pipeline order and closed flag are on the row. Headers are
+HubSpot's property labels.
 
-`Deals` columns:
+Columns:
 
-- Record ID, Deal Name, Pipeline, Deal Stage ID, Deal Stage, Deal Owner ID, Deal Owner
+- Record ID, Deal Name, Pipeline
+- Deal Stage ID, Deal Stage, **Deal Stage Order** (pipeline order, for sorting
+  the funnel), **Deal Stage Is Closed**
+- Deal Owner ID, Deal Owner
 - Create Date, Close Date, Last Modified Date, Date entered current stage
-- Lead - Source, Lead - Source (Group), Original Traffic Source, Record source
+- Lead - Source, Lead - Source (Group), Original Traffic Source, Original
+  Traffic Source Drill-Down 1, Record source
+- **Channel detail** — what splits Prospect by channel, since Lead - Source
+  (Group) has no calls or forms bucket:
+  - AirCall Entry Number — inbound call, and the line it came in on
+  - Auto Dialer Call Type — outbound auto-dialer (Crexendo) call
+  - Lead Generation Form, Form ID — website / Facebook / Typeform forms
+  - utm_source, utm_medium, utm_campaign and the Typeform `TF: UTM` trio
+  - GCLID — Google Ads click (PPC)
 - **Close Out Reason** (`drop_reason`) — the detail for Closed Lost
 - **RO Review (Final Decision)** (`ro_review__final_decision_`) — the opt-in /
   opt-out split: `Lit - Opt In`, `Lit - Opt Out`, `Pre-Lit (OPT IN OEM)`,
@@ -75,7 +85,9 @@ The first real run creates the file; later runs overwrite it.
   stage says since when
 - Last Refresh (Pacific)
 
-Size: ~18,000 rows and ~3.5 MB in September 2026, ~5 MB by year end.
+A dry run prints how many rows have a value in each column (counts only).
+
+Size: ~18,000 rows and ~3.5–4 MB in September 2026, ~5–6 MB by year end.
 
 ## Failure behaviour
 
