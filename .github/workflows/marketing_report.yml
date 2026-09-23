@@ -45,7 +45,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Test
-        run: python tests/test_main.py
+        run: |
+          python tests/test_main.py
+          python tests/test_splice.py
 
       - name: Run report script
         env:

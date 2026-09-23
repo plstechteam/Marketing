@@ -10,12 +10,15 @@ import io
 import os
 import sys
 import time
+import zipfile
 from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytz
 import requests
 import xlsxwriter
+
+import splice
 
 # ======================================================
 # CONFIGURATION
@@ -646,22 +649,34 @@ def graph_token(tenant_id, client_id, client_secret):
     return r.json()["access_token"]
 
 
-def check_destination(token):
-    """Confirm the target folder exists and say whether the file does yet."""
+def fetch_existing(token):
+    """(bytes, eTag) of the workbook in SharePoint, or (None, None) if it does
+    not exist yet. Also proves the folder is reachable."""
     headers = {"Authorization": f"Bearer {token}"}
-    folder = FILE_PATH.rsplit("/", 1)[0]
     base = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/"
+    folder = FILE_PATH.rsplit("/", 1)[0]
     r = request_with_retry("GET", base + folder, headers=headers)
     if r.status_code != 200:
         fail(f"SharePoint folder '{folder}': {r.status_code} — {r.text}")
-    print(f"SharePoint folder OK: {folder}")
     r = request_with_retry("GET", base + FILE_PATH, headers=headers)
-    if r.status_code == 200:
-        print(f"'{FILE_PATH}' exists ({r.json().get('size', 0) / 1024:.1f} KB) — a real run overwrites it")
-    elif r.status_code == 404:
-        print(f"'{FILE_PATH}' does not exist yet — the first real run creates it")
-    else:
+    if r.status_code == 404:
+        return None, None
+    if r.status_code != 200:
         fail(f"SharePoint file check: {r.status_code} — {r.text}")
+    etag = r.json().get("eTag")
+    r = request_with_retry("GET", base + FILE_PATH + ":/content", headers=headers,
+                           timeout=UPLOAD_TIMEOUT)
+    if r.status_code != 200:
+        fail(f"SharePoint download: {r.status_code} — {r.text}")
+    return r.content, etag
+
+
+def other_sheet_parts(xlsx_bytes, report):
+    """{part: bytes} for every worksheet part except the one this job owns."""
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as z:
+        return {n: z.read(n) for n in z.namelist()
+                if n.startswith("xl/worksheets/") and n.endswith(".xml")
+                and n != report["sheet_part"]}
 
 
 def check_stored(item, expected_size, started):
@@ -684,7 +699,7 @@ def check_stored(item, expected_size, started):
     return None
 
 
-def upload(workbook_bytes, token, expected_size):
+def upload(workbook_bytes, token, expected_size, etag=None):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{FILE_PATH}:/content"
     started = datetime.now(timezone.utc)
     r = request_with_retry(
@@ -692,10 +707,17 @@ def upload(workbook_bytes, token, expected_size):
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            # Only overwrite the version this run read. If someone saved the
+            # file in between (a change to Maz, say), SharePoint answers 412
+            # and their work stands; the next run starts from it.
+            **({"If-Match": etag} if etag else {}),
         },
         data=workbook_bytes,
         timeout=UPLOAD_TIMEOUT,
     )
+    if r.status_code == 412:
+        fail("upload: the workbook changed in SharePoint while this run was working — "
+             "nothing overwritten; the next run will pick up the new version.")
     if r.status_code not in (200, 201):
         fail(f"upload: {r.status_code} — {r.text}")
     # Graph answers with the stored file; make sure it is this run's.
@@ -905,18 +927,31 @@ def main():
     df_deals["last_refresh"] = refreshed
     df_deals = to_sheet(df_deals, definitions, stage_columns)
 
-    t0 = time.monotonic()
-    workbook = build_workbook(df_deals)
-    size_kb = len(workbook) / 1024
-    print(f"Workbook built: {size_kb:.0f} KB ({time.monotonic() - t0:.0f}s)")
-
     token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
     print("Graph token obtained OK")
 
+    # The workbook is shared: people keep their own tabs next to Deals (Maz
+    # was the first). Only the Deals sheet is replaced; every other part of
+    # the file is copied byte for byte — see splice.py.
+    t0 = time.monotonic()
+    existing, etag = fetch_existing(token)
+    if existing is None:
+        print(f"'{FILE_PATH}' does not exist yet — building it from scratch")
+        workbook, report = build_workbook(df_deals), None
+    else:
+        try:
+            workbook, report = splice.replace_sheet(existing, DEALS_SHEET, df_deals)
+        except splice.SpliceError as exc:
+            fail(f"cannot update '{DEALS_SHEET}' safely: {exc} — nothing written")
+        if not splice.untouched_parts_identical(existing, workbook, report):
+            fail("a part other than Deals would change — nothing written")
+        print(f"Sheets in the workbook: {', '.join(report['sheets'])}")
+        print(f"Replacing only '{DEALS_SHEET}' ({report['sheet_part']}); "
+              f"{len(report['untouched'])} other parts copied unchanged")
+    size_kb = len(workbook) / 1024
+    print(f"Workbook built: {size_kb:.0f} KB ({time.monotonic() - t0:.0f}s)")
+
     if DRY_RUN:
-        # A dry run still proves Graph can see the destination, so the first
-        # real run is not where a wrong drive, folder or permission shows up.
-        check_destination(token)
         # Counts only — deal names are client data and must not reach CI logs.
         print(f"DRY RUN: would upload {size_kb:.1f} KB to {FILE_PATH}")
         print(f"DRY RUN: one sheet '{DEALS_SHEET}', {len(df_deals)} rows x {len(df_deals.columns)} columns")
@@ -946,8 +981,18 @@ def main():
             print(f"    {n:>6}  {col}")
         return
 
-    status = upload(workbook, token, len(workbook))
+    status = upload(workbook, token, len(workbook), etag)
     print(f"File {'created' if status == 201 else 'uploaded'} ({size_kb:.1f} KB): {FILE_PATH}")
+
+    # Read it back and make sure every other tab arrived exactly as it was.
+    # This cannot undo an upload, but it turns a silent loss into a failed
+    # run — and SharePoint's version history can restore the previous file.
+    if report is not None:
+        stored, _ = fetch_existing(token)
+        if other_sheet_parts(stored, report) != other_sheet_parts(existing, report):
+            fail("the other tabs in SharePoint's copy differ from before the upload — "
+                 "check the file and restore the previous version from its version history")
+        print("Verified: every other tab in SharePoint is unchanged")
     print(f"Rows written: {len(df_deals)} x {len(df_deals.columns)} columns")
     print(f"Last Refresh: {refreshed:%B %d, %Y at %I:%M %p} Pacific")
 

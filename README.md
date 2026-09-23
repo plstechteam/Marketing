@@ -157,11 +157,34 @@ A full rewrite is kept on purpose rather than updating only changed deals:
 at this size it costs seconds, and it is what guarantees the file matches
 HubSpot exactly on every run.
 
+## Other tabs in the workbook are never touched
+
+The workbook is shared: people keep their own tabs next to Deals (the first
+was **Maz**). A run replaces **only the Deals sheet** and copies every other
+part of the file byte for byte — other tabs, their formulas, formatting,
+charts, pivots and shared strings (`splice.py`).
+
+- The file is downloaded, the Deals worksheet part is swapped, and the run
+  checks every other part is byte-identical **before** uploading.
+- The upload carries the version it read (`If-Match`). If someone saved the
+  file in the meantime — a change to Maz, say — SharePoint refuses it and
+  their work stands; the next run starts from their version.
+- After the upload the file is downloaded again and every other tab is
+  compared with what was there before; any difference fails the run
+  (SharePoint's version history can restore the previous file).
+- The file is not opened and re-saved with a spreadsheet library: openpyxl
+  and similar drop charts and images they cannot read. Formulas that read
+  Deals recalculate when the file is next opened (`fullCalcOnLoad`).
+- If Deals is missing or has something attached to it (a table, a chart on
+  the Deals tab itself), the run stops without writing rather than guess.
+- **Do not put your own content on the Deals tab** — it is rebuilt every
+  run. Build on another tab and point formulas or pivots at Deals.
+
 ## Every run is a full refresh
 
 Nothing is carried over from the previous file. Each run pulls **every** deal
-created this year and **every** column from HubSpot again, and overwrites the
-workbook. So whatever changed in HubSpot since the last run — a stage move, a
+created this year and **every** column from HubSpot again, and rewrites the
+Deals tab completely. So whatever changed in HubSpot since the last run — a stage move, a
 close, a new settlement date or fee, a reassigned attorney, a corrected
 manufacturer, a deal merged or deleted — is in the next file. There is no
 "only recent changes" mode to fall out of step.
@@ -194,4 +217,5 @@ What makes sure a run either lands complete or changes nothing:
 
 ```
 python tests/test_main.py
+python tests/test_splice.py
 ```
