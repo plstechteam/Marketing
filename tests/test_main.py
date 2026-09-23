@@ -215,6 +215,18 @@ def test_workbook_round_trips_every_type():
     assert [c.value for c in ws[3]] == [None, None, None, None, None, False]
 
 
+def test_check_stored_allows_sharepoint_metadata_but_not_stale_or_truncated():
+    from datetime import timezone
+    started = datetime(2026, 9, 23, 3, 50, tzinfo=timezone.utc)
+    fresh = "2026-09-23T03:50:12Z"
+    # The real case: SharePoint added ~9 KB of its own metadata.
+    assert main.check_stored({"size": 3003318, "lastModifiedDateTime": fresh}, 2994000, started) is None
+    assert "stored" in main.check_stored({"size": 1000, "lastModifiedDateTime": fresh}, 2994000, started)
+    assert "before" in main.check_stored({"size": 2994000, "lastModifiedDateTime": "2026-09-22T10:00:00Z"},
+                                         2994000, started)
+    assert main.check_stored({}, 2994000, started) is not None
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]
