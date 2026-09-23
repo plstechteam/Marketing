@@ -60,22 +60,21 @@ Columns:
 - Deal Stage ID, Deal Stage, **Deal Stage Order** (pipeline order, for sorting
   the funnel), **Deal Stage Is Closed**
 - Deal Owner ID, Deal Owner
-- Create Date, Close Date, Last Modified Date, Date entered current stage
+- Create Date, Last Modified Date, Date entered current stage
 - Lead - Source, Lead - Source (Group), Original Traffic Source, Original
   Traffic Source Drill-Down 1, Record source
 - **Channel detail** — what splits Prospect by channel, since Lead - Source
   (Group) has no calls or forms bucket:
   - AirCall Entry Number — inbound call, and the line it came in on
   - Auto Dialer Call Type — outbound auto-dialer (Crexendo) call
-  - Lead Generation Form, Form ID — website / Facebook / Typeform forms
-  - utm_source, utm_medium, utm_campaign and the Typeform `TF: UTM` trio
+  - TF: UTM Source / Medium / Campaign — the Typeform (web form) UTMs
   - GCLID — Google Ads click (PPC)
 - **Close Out Reason** (`drop_reason`) — the detail for Closed Lost
 - **RO Review (Final Decision)** (`ro_review__final_decision_`) — the opt-in /
   opt-out split: `Lit - Opt In`, `Lit - Opt Out`, `Pre-Lit (OPT IN OEM)`,
   `Pre-Lit (OPT OUT OEM)`, plus the non-opt values (`Sign Up - Pre-Lit`,
   `Sign Up - Lit (AB1755)`, `Sign Up - Pre-Lit (GM)`, …)
-- Legal Sub Phase, Intake Outcome, Class Action, Lemon Law - State
+- Legal Sub Phase, Lemon Law - State
 - **Date entered "<stage>"** — one column per stage of the pipeline, built
   from the pipeline at run time so a new stage gets its column without a code
   change. HubSpot has no "date entered" property for four stages: **HOLD**
@@ -86,6 +85,12 @@ Columns:
 - Last Refresh (Pacific)
 
 A dry run prints how many rows have a value in each column (counts only).
+
+**Left out because HubSpot never fills them** on this year's Lemon Law deals
+(measured on all 18,111 in September 2026): Close Date, Intake Outcome, Class
+Action, the deal-level utm_source / utm_medium / utm_campaign, Lead Generation
+Form and Form ID. **Close Date is never set in this pipeline** — date a closed
+deal by its stage's "Date entered" column or Date entered current stage.
 
 Size: ~18,000 rows and ~3.5–4 MB in September 2026, ~5–6 MB by year end.
 

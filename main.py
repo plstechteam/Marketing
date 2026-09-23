@@ -53,7 +53,6 @@ BASE_PROPERTIES = [
     "dealstage",
     "hubspot_owner_id",
     "createdate",
-    "closedate",
     "hs_lastmodifieddate",
     "hs_v2_date_entered_current_stage",
     "lead___source",
@@ -66,22 +65,21 @@ BASE_PROPERTIES = [
     # website form / PPC / social.
     "aircall_entry_number",         # inbound call — the Aircall line it came in on
     "auto_dialer_call_type",        # outbound auto-dialer (Crexendo) call type
-    "lead_generation_form",         # Facebook Form / Typeform / HubSpot Form
-    "hs_form_id",
-    "utm_source",
-    "utm_medium",
-    "utm_campaign",
-    "tf__utm_source",
+    "tf__utm_source",               # Typeform UTMs — the deal-level utm_* are unused
     "tf__utm_medium",
     "tf__utm_campaign",
     "gclid",                        # Google Ads click id — PPC
     "drop_reason",                  # Close Out Reason — detail for Closed Lost
     "ro_review__final_decision_",   # Opt In / Opt Out split
     "deal_stage___sub_phase",
-    "intake_outcome",
-    "class_action",
     "legal_pipeline",
 ]
+# Left out on purpose, measured on every 2026 Lemon Law deal (18,111) in
+# September 2026: closedate, intake_outcome, class_action, utm_source,
+# utm_medium, utm_campaign, lead_generation_form and hs_form_id were blank on
+# every one. Close Date in particular is never set in this pipeline — date a
+# closed deal by its stage's "Date entered" column or Date entered current
+# stage instead. Add a property back here if it starts being used.
 
 # Search stops paging at 10,000 results with no error — it simply stops
 # returning `after`. The year is well past that, so it is pulled a calendar
@@ -277,7 +275,7 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
 
     columns = []
     for name in properties:
-        label = definitions.get(name, {}).get("label") or name
+        label = (definitions.get(name, {}).get("label") or name).strip()
         if name == "dealstage":
             columns.append(("dealstage__id", "Deal Stage ID"))
         if name == "hubspot_owner_id":
