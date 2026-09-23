@@ -1,0 +1,61 @@
+name: Marketing Report
+
+# Scheduling is driven entirely by an EXTERNAL cron that calls the
+# workflow_dispatch API, the same way as the Monthly Settlement Report.
+# Do not add a `schedule:` trigger — GitHub would fire its own run on top of
+# the cron, doubling the Actions minutes and letting two runs write the same
+# SharePoint file at once.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run the full pipeline but skip the SharePoint upload"
+        type: boolean
+        default: false
+      file_path:
+        description: "SharePoint path to write (blank = the live Marketing.xlsx). Use this to aim a run at a TEST copy."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Never let two runs overwrite the SharePoint file at the same time.
+concurrency:
+  group: marketing-report
+  cancel-in-progress: false
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test
+        run: python tests/test_main.py
+
+      - name: Run report script
+        env:
+          PYTHONUNBUFFERED: '1'
+          DRY_RUN: ${{ inputs.dry_run }}
+          # Empty means "use the default", which is the live file; main.py
+          # reads this with `or` so an empty string does not win.
+          SHAREPOINT_FILE_PATH: ${{ inputs.file_path }}
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: python main.py
