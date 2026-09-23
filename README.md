@@ -59,8 +59,16 @@ Columns:
 - Record ID, Deal Name, Pipeline
 - Deal Stage ID, Deal Stage, **Deal Stage Order** (pipeline order, for sorting
   the funnel), **Deal Stage Is Closed**
+- **Close Date**, **Close Date Source** — filled for every deal whose stage
+  HubSpot marks closed, blank for open ones. HubSpot's own Close Date is never
+  set in this pipeline, so it comes from the firm's fields: **Date - Settled**
+  for the Settled stages, **Date - Closed Out** (then Date - Close Out After
+  Retained) for the rest, and the date the deal entered its current stage when
+  that field is blank. Close Date Source names the field used
 - Deal Owner ID, Deal Owner
 - Create Date, Last Modified Date, Date entered current stage
+- **Case Category** (Lit / Pre-Lit), **Date - Settled**, Date - Closed Out,
+  Date - Close Out After Retained
 - Lead - Source, Lead - Source (Group), Original Traffic Source, Original
   Traffic Source Drill-Down 1, Record source
 - **Channel detail** — what splits Prospect by channel, since Lead - Source
@@ -89,8 +97,8 @@ A dry run prints how many rows have a value in each column (counts only).
 **Left out because HubSpot never fills them** on this year's Lemon Law deals
 (measured on all 18,111 in September 2026): Close Date, Intake Outcome, Class
 Action, the deal-level utm_source / utm_medium / utm_campaign, Lead Generation
-Form and Form ID. **Close Date is never set in this pipeline** — date a closed
-deal by its stage's "Date entered" column or Date entered current stage.
+Form and Form ID. HubSpot's own Close Date is blank on every Lemon Law deal —
+the sheet's Close Date above replaces it.
 
 Size: ~18,000 rows and ~3.5–4 MB in September 2026, ~5–6 MB by year end.
 

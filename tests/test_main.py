@@ -98,6 +98,24 @@ def test_add_stage_attributes_puts_order_and_closed_on_each_row():
     assert pd.isna(out["Deal Stage Order"].iloc[2])
 
 
+def test_close_date_for_picks_the_field_that_matches_how_it_closed():
+    from datetime import date
+    settled = {"date___settled": "2026-05-04", "date___dropped": "2026-01-01",
+               "hs_v2_date_entered_current_stage": "2026-06-01T12:00:00Z"}
+    assert main.close_date_for(settled, "Settled - Pre Lit", True) == (date(2026, 5, 4), "date___settled")
+    closed_out = {"date___dropped": "2026-02-03"}
+    assert main.close_date_for(closed_out, "Close Out", True) == (date(2026, 2, 3), "date___dropped")
+    after_retained = {"date__intake_sign_up_close_out": "2026-03-01"}
+    assert main.close_date_for(after_retained, "Retained - Client Dropped", True) == \
+        (date(2026, 3, 1), "date__intake_sign_up_close_out")
+    # Closed with the firm's field blank: never left undated.
+    bare = {"hs_v2_date_entered_current_stage": "2026-06-01T12:00:00Z"}
+    assert main.close_date_for(bare, "Settled - Lit", True) == \
+        (date(2026, 6, 1), "hs_v2_date_entered_current_stage")
+    # Open: no close date even when a date field happens to be filled.
+    assert main.close_date_for(settled, "Intake", False) == (None, None)
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]

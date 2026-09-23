@@ -55,6 +55,10 @@ BASE_PROPERTIES = [
     "createdate",
     "hs_lastmodifieddate",
     "hs_v2_date_entered_current_stage",
+    "case_category",                # Lit / Pre-Lit
+    "date___settled",               # Date - Settled — confirms the settlement
+    "date___dropped",               # Date - Closed Out
+    "date__intake_sign_up_close_out",   # Date - Close Out After Retained
     "lead___source",
     "lead___source__group_",
     "hs_analytics_source",
@@ -77,9 +81,10 @@ BASE_PROPERTIES = [
 # Left out on purpose, measured on every 2026 Lemon Law deal (18,111) in
 # September 2026: closedate, intake_outcome, class_action, utm_source,
 # utm_medium, utm_campaign, lead_generation_form and hs_form_id were blank on
-# every one. Close Date in particular is never set in this pipeline — date a
-# closed deal by its stage's "Date entered" column or Date entered current
-# stage instead. Add a property back here if it starts being used.
+# every one. HubSpot's own closedate is blank on every Lemon Law deal ever
+# (none of the 231,000+), which is why the sheet's Close Date is taken from
+# the firm's own date fields instead — see close_date_for. Add a property back
+# here if it starts being used.
 
 # Search stops paging at 10,000 results with no error — it simply stops
 # returning `after`. The year is well past that, so it is pulled a calendar
@@ -465,6 +470,56 @@ def add_stage_attributes(df, stages):
     return df
 
 
+def close_date_for(props, stage_label, is_closed):
+    """(Close Date, where it came from) for one deal; (None, None) if open.
+
+    HubSpot never sets closedate in this pipeline, so a closed deal is dated
+    from the firm's own fields, the one that matches how it closed:
+
+      Settled stages   Date - Settled, the date that confirms the settlement
+      any other closed Date - Closed Out, then Date - Close Out After Retained
+
+    and, for a closed deal whose field is blank, the day it entered its
+    current stage — HubSpot stamps that on every move, so a closed row is
+    never left without a date. The second column names the field used, so a
+    row dated by the fallback can be told apart from one dated by the firm.
+    """
+    if not is_closed:
+        return None, None
+    if stage_label.lower().startswith("settled"):
+        preferred = ["date___settled"]
+    else:
+        preferred = ["date___dropped", "date__intake_sign_up_close_out"]
+    for name in preferred:
+        if props.get(name):
+            return parse_hubspot_date(props[name]), name
+    entered = parse_hubspot_datetime(props.get("hs_v2_date_entered_current_stage"))
+    if entered:
+        return entered.date(), "hs_v2_date_entered_current_stage"
+    return None, None
+
+
+def add_close_date(df, deals, stages):
+    """Close Date and Close Date Source, right after Deal Stage Is Closed.
+
+    Relies on df having one row per deal in the order of `deals`, which is
+    how build_deals_frame builds it.
+    """
+    info = {s["id"]: s for s in stages}
+    dates, sources = [], []
+    for deal in deals:
+        p = deal.get("properties", {})
+        stage = info.get(p.get("dealstage"), {})
+        closed = str((stage.get("metadata") or {}).get("isClosed", "")).lower() == "true"
+        d, src = close_date_for(p, stage.get("label", ""), closed)
+        dates.append(d)
+        sources.append(src)
+    at = df.columns.get_loc("Deal Stage Is Closed") + 1
+    df.insert(at, "Close Date", dates)
+    df.insert(at + 1, "Close Date Source", sources)
+    return df
+
+
 def build_workbook(df_deals):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl",
@@ -526,6 +581,10 @@ def main():
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
+    df_deals = add_close_date(df_deals, deals, stages)
+    closed_stages = [s["label"] for s in stages
+                     if str((s.get("metadata") or {}).get("isClosed", "")).lower() == "true"]
+    print(f"Stages HubSpot marks closed: {', '.join(closed_stages) or 'none'}")
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
     df_deals["Last Refresh"] = refreshed
 
@@ -545,6 +604,11 @@ def main():
         # Fill rate per column — counts, no client data — so a dry run shows
         # which columns HubSpot actually populates.
         filled = df_deals.notna().sum()
+        closed = df_deals["Deal Stage Is Closed"] == True  # noqa: E712
+        print(f"DRY RUN: closed deals {int(closed.sum())}, with Close Date "
+              f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
+        for src, n in df_deals.loc[closed, "Close Date Source"].value_counts(dropna=False).items():
+            print(f"    {n:>6}  {src}")
         print("DRY RUN: rows with a value, per column:")
         for col, n in filled.items():
             print(f"    {n:>6}  {col}")
