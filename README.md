@@ -71,6 +71,9 @@ Columns:
   Retained) for the rest, and the date the deal entered its current stage when
   that field is blank. Close Date Source names the field used
 - Deal Owner ID, Deal Owner
+- **Intake - Case Supervisor**, **Senior Case Supervisor**, **Legal - Handling
+  Attorney**, **Settlement Attorney** — names; archived people resolve through
+  the owner list
 - Create Date, Last Modified Date, Date entered current stage
 - **Case Category** (Lit / Pre-Lit), **Date - Settled**, Date - Closed Out,
   Date - Close Out After Retained

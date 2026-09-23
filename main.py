@@ -52,6 +52,12 @@ BASE_PROPERTIES = [
     "pipeline",
     "dealstage",
     "hubspot_owner_id",
+    # People on the case. HubSpot stores these as dropdowns whose values are
+    # owner ids; they go out as names (see label_value's fallback).
+    "n5__retainer_representative",  # Intake - Case Supervisor
+    "senior_case_supervisor",       # Senior Case Supervisor
+    "handling_attorney",            # Legal - Handling Attorney
+    "supervising_attorney",         # Settlement Attorney
     "createdate",
     "hs_lastmodifieddate",
     "hs_v2_date_entered_current_stage",
@@ -202,17 +208,20 @@ def option_labels(definition):
     return {o["value"]: o["label"] for o in definition.get("options") or []}
 
 
-def label_value(raw, labels):
+def label_value(raw, labels, fallback=None):
     """Map an enumeration's stored value(s) to what HubSpot's UI shows.
 
-    Multi-select values arrive ';'-joined. A value with no option (an option
-    since deleted) is kept as stored rather than blanked.
+    Multi-select values arrive ';'-joined. A value with no option is looked up
+    in `fallback` — the owner map, because the people dropdowns (case
+    supervisor, attorneys) store owner ids and drop the option when someone
+    is archived — and otherwise kept as stored rather than blanked.
     """
     if raw is None or raw == "":
         return None
-    if not labels:
+    fallback = fallback or {}
+    if not labels and not fallback:
         return raw
-    return ";".join(labels.get(v, v) for v in str(raw).split(";"))
+    return ";".join(labels.get(v) or fallback.get(v, v) for v in str(raw).split(";"))
 
 
 def parse_hubspot_datetime(raw):
@@ -290,7 +299,7 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
             elif d.get("type") == "date":
                 row[name] = parse_hubspot_date(raw)
             elif d.get("type") == "enumeration":
-                row[name] = label_value(raw, option_labels(d))
+                row[name] = label_value(raw, option_labels(d), owners)
             else:
                 row[name] = raw if raw != "" else None
         records.append(row)

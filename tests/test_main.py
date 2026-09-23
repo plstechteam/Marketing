@@ -34,6 +34,11 @@ def test_label_value_maps_single_and_multi_and_keeps_unknown():
     assert main.label_value("Gone", labels) == "Gone"
     assert main.label_value("", labels) is None
     assert main.label_value(None, labels) is None
+    # People dropdowns: an archived owner has no option but is in the owner map.
+    people = {"77": "Ann Lee"}
+    assert main.label_value("77", people, {"99": "Old Owner"}) == "Ann Lee"
+    assert main.label_value("99", people, {"99": "Old Owner"}) == "Old Owner"
+    assert main.label_value("12", people, {"99": "Old Owner"}) == "12"
 
 
 def test_datetime_goes_to_bogota():
