@@ -65,9 +65,9 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 | **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Deal Stage Is Closed, Date entered current stage, Close Date, Close Date Source |
 | **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
 | **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
-| **Milestones** | Date - RO Review, Date exited "New File Set Up - Doc Collection", Date - Referred Out |
+| **Milestones** | Date entered "Intake", Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
 | **Outcome** | Case Category, Date - Settled, Total Settled Attorneys Fees and Cost, Net Attorney Fees, Close Out Reason, Date - Closed Out, Date - Close Out After Retained, Legal Sub Phase |
-| **Cycle time (days)** | Days: Created to RO Review, Days: RO Review to File Set Up, Days: Created to File Set Up, Days: Created to Settled |
+| **Cycle time (days)** | Created to Intake, Created to RO Review, Intake to Retainer Signed, RO Review to Retainer Signed, Retainer Signed to Ready for Legal, RO Review to Ready for Legal, Intake to Ready for Legal, Created to Ready for Legal, Created to Settled |
 | **People** | Deal Owner, Deal Owner ID, Intake - Case Supervisor, Senior Case Supervisor, Legal - Handling Attorney, Settlement Attorney |
 | **Stage history** | Date entered "<stage>" for every stage, in pipeline order |
 | **Audit** | Pipeline, Last Modified Date, Last Refresh |
@@ -101,14 +101,17 @@ still comes out, just before Audit — and a test fails until it is placed.
   Referred Out and TEST get no column. Their deals are still in the sheet.
 - There is no "New File Set Up - Intake" stage in this pipeline; the file
   set-up stage is "New File Set Up - Doc Collection".
+- **Milestones**, in the order a case moves:
+  1. **Intake** — Date entered "Intake" (the stage's own HubSpot stamp)
+  2. **RO Review** — Date - RO Review
+  3. **Retainer Signed** — Date - Retainer Signed (`date___retained`)
+  4. **Ready for Legal** — the day the deal left New File Set Up - Doc
+     Collection (`hs_v2_date_exited_5792630`)
 - **Cycle time (days)** — whole calendar days between two of the row's own
-  dates (`DURATIONS` in `main.py`):
-  - Created to RO Review: Create Date -> Date - RO Review
-  - RO Review to File Set Up: Date - RO Review -> Date exited "New File Set
-    Up - Doc Collection"
-  - Created to File Set Up: Create Date -> Date exited "New File Set Up - Doc
-    Collection"
-  - Created to Settled: Create Date -> Date - Settled
+  dates (`DURATIONS` in `main.py`): Created to Intake, Created to RO Review,
+  Intake to Retainer Signed, RO Review to Retainer Signed, Retainer Signed to
+  Ready for Legal, RO Review to Ready for Legal, Intake to Ready for Legal,
+  Created to Ready for Legal, Created to Settled.
 
   Blank when either date is missing. A negative value is kept — it means the
   dates in HubSpot are out of order — and the dry run counts them. Recomputed

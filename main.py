@@ -69,7 +69,8 @@ BASE_PROPERTIES = [
     "date__intake_sign_up_close_out",   # Date - Close Out After Retained
     "date___referred_out",          # Date - Referred Out
     "date___ro_review",             # Date - RO Review
-    "hs_v2_date_exited_5792630",    # Date exited "New File Set Up - Doc Collection"
+    "date___retained",              # Date - Retainer Signed
+    "hs_v2_date_exited_5792630",    # left New File Set Up = ready for Legal
     "total_settled_attorneys_fees_and_cost",
     "net_attorney_fees",
     # Vehicle. Manufacturer is the full legal name (s__manufacturer), not
@@ -390,17 +391,32 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
     return pd.DataFrame(records)
 
 
+# The milestones the cycle times run between. Intake is the day the deal
+# entered the Intake stage; Ready for Legal is the day it left New File Set
+# Up - Doc Collection, i.e. the signed case handed to Legal.
+INTAKE_ENTERED = "hs_v2_date_entered_5411633"
+READY_FOR_LEGAL = "hs_v2_date_exited_5792630"
+
 # Cycle times, in calendar days, computed on every run from that run's
 # dates — so a date corrected in HubSpot corrects its duration on the next
-# run. (key, header, from date, to date). "File Set Up" is the day the deal
-# left New File Set Up - Doc Collection.
+# run. (key, header, from date, to date).
 DURATIONS = [
+    ("days_created_to_intake", "Days: Created to Intake",
+     "createdate", INTAKE_ENTERED),
     ("days_created_to_ro_review", "Days: Created to RO Review",
      "createdate", "date___ro_review"),
-    ("days_ro_review_to_file_set_up", "Days: RO Review to File Set Up",
-     "date___ro_review", "hs_v2_date_exited_5792630"),
-    ("days_created_to_file_set_up", "Days: Created to File Set Up",
-     "createdate", "hs_v2_date_exited_5792630"),
+    ("days_intake_to_signed", "Days: Intake to Retainer Signed",
+     INTAKE_ENTERED, "date___retained"),
+    ("days_ro_review_to_signed", "Days: RO Review to Retainer Signed",
+     "date___ro_review", "date___retained"),
+    ("days_signed_to_ready_for_legal", "Days: Retainer Signed to Ready for Legal",
+     "date___retained", READY_FOR_LEGAL),
+    ("days_ro_review_to_ready_for_legal", "Days: RO Review to Ready for Legal",
+     "date___ro_review", READY_FOR_LEGAL),
+    ("days_intake_to_ready_for_legal", "Days: Intake to Ready for Legal",
+     INTAKE_ENTERED, READY_FOR_LEGAL),
+    ("days_created_to_ready_for_legal", "Days: Created to Ready for Legal",
+     "createdate", READY_FOR_LEGAL),
     ("days_created_to_settled", "Days: Created to Settled",
      "createdate", "date___settled"),
 ]
@@ -439,6 +455,7 @@ FIXED_HEADERS = {
     "hubspot_owner_id": "Deal Owner",
     "hubspot_owner_id__id": "Deal Owner ID",
     "last_refresh": "Last Refresh",
+    READY_FOR_LEGAL: "Date - Ready for Legal (Exited File Set Up)",
     **{key: header for key, header, _, _ in DURATIONS},
 }
 
@@ -458,7 +475,10 @@ COLUMN_GROUPS = [
     ("Vehicle / AB 1755", ["s__manufacturer", "s__manufacturer__ab1755",
                            "ro_review__final_decision_", "vehicle___year",
                            "c__vehicle___model__new_test_"]),
-    ("Milestones", ["date___ro_review", "hs_v2_date_exited_5792630", "date___referred_out"]),
+    # In the order a case moves: intake, RO review, retainer signed, handed
+    # to Legal. Intake's date lives here rather than in Stage history.
+    ("Milestones", [INTAKE_ENTERED, "date___ro_review", "date___retained",
+                    READY_FOR_LEGAL, "date___referred_out"]),
     ("Outcome", ["case_category", "date___settled", "total_settled_attorneys_fees_and_cost",
                  "net_attorney_fees", "drop_reason", "date___dropped",
                  "date__intake_sign_up_close_out", "deal_stage___sub_phase"]),
