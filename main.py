@@ -86,6 +86,23 @@ BASE_PROPERTIES = [
 # the firm's own date fields instead — see close_date_for. Add a property back
 # here if it starts being used.
 
+# The stages where a case is over, by label. HubSpot's own "closed" flag
+# cannot be used: it marks only the three Settled stages, so Close Out — where
+# 93% of this year's deals end — would read as open and carry no close date.
+# Labels, not ids, as in the Settlement repo: ids are opaque, and a renamed
+# stage should fail loudly (see check_closed_stages) rather than be silently
+# reclassified. This is the one place to change the definition.
+CLOSED_STAGE_LABELS = {
+    # won
+    "Settled - Lit",
+    "Settled - Pre Lit",
+    "Settled - Referred Out",
+    # lost
+    "Close Out",
+    "Retained - Drop Client",
+    "Retained - Client Dropped",
+}
+
 # Search stops paging at 10,000 results with no error — it simply stops
 # returning `after`. The year is well past that, so it is pulled a calendar
 # month at a time, and a month that reaches the ceiling aborts the run rather
@@ -465,8 +482,7 @@ def add_stage_attributes(df, stages):
     df.insert(at, "Deal Stage Order",
               ids.map(lambda i: info[i].get("displayOrder") if i in info else None))
     df.insert(at + 1, "Deal Stage Is Closed",
-              ids.map(lambda i: str((info[i].get("metadata") or {}).get("isClosed", "")).lower() == "true"
-                      if i in info else None))
+              ids.map(lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None))
     return df
 
 
@@ -499,6 +515,15 @@ def close_date_for(props, stage_label, is_closed):
     return None, None
 
 
+def check_closed_stages(stages):
+    """Every closed label must still exist in the pipeline, or the run stops:
+    a renamed stage would otherwise quietly become "open" and lose its dates."""
+    missing = CLOSED_STAGE_LABELS - {s["label"] for s in stages}
+    if missing:
+        fail(f"closed stage(s) not in the pipeline any more: {', '.join(sorted(missing))} "
+             "— update CLOSED_STAGE_LABELS in main.py.")
+
+
 def add_close_date(df, deals, stages):
     """Close Date and Close Date Source, right after Deal Stage Is Closed.
 
@@ -510,7 +535,7 @@ def add_close_date(df, deals, stages):
     for deal in deals:
         p = deal.get("properties", {})
         stage = info.get(p.get("dealstage"), {})
-        closed = str((stage.get("metadata") or {}).get("isClosed", "")).lower() == "true"
+        closed = stage.get("label") in CLOSED_STAGE_LABELS
         d, src = close_date_for(p, stage.get("label", ""), closed)
         dates.append(d)
         sources.append(src)
@@ -559,6 +584,7 @@ def main():
 
     pipeline_label, stages = fetch_pipeline(hs_headers)
     print(f"Pipeline '{pipeline_label}': {len(stages)} stages")
+    check_closed_stages(stages)
     stage_labels = {s["id"]: s["label"] for s in stages}
     stage_candidates = [f"hs_v2_date_{kind}_{s['id']}"
                         for s in stages for kind in ("entered", "exited")]
@@ -577,14 +603,23 @@ def main():
     if not deals:
         fail("HubSpot returned no deals — refusing to write an empty report.")
 
+    # One row per deal created this year, every one dated. The windows already
+    # guarantee it; checking the rows themselves means a filter that ever
+    # stops meaning what we think fails here instead of shipping.
+    created = [parse_hubspot_datetime(d.get("properties", {}).get("createdate")) for d in deals]
+    undated = sum(c is None for c in created)
+    outside = sum(c is not None and not (year_start.replace(tzinfo=None) <= c <= now_deal_tz.replace(tzinfo=None))
+                  for c in created)
+    if undated or outside:
+        fail(f"{undated} deals without a create date and {outside} created outside "
+             f"{year_start:%Y-%m-%d} to now — nothing written.")
+    print(f"Every deal created {year_start:%Y-%m-%d} or later, all {len(deals)} dated")
+
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
-    closed_stages = [s["label"] for s in stages
-                     if str((s.get("metadata") or {}).get("isClosed", "")).lower() == "true"]
-    print(f"Stages HubSpot marks closed: {', '.join(closed_stages) or 'none'}")
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
     df_deals["Last Refresh"] = refreshed
 
@@ -605,6 +640,7 @@ def main():
         # which columns HubSpot actually populates.
         filled = df_deals.notna().sum()
         closed = df_deals["Deal Stage Is Closed"] == True  # noqa: E712
+
         print(f"DRY RUN: closed deals {int(closed.sum())}, with Close Date "
               f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
         for src, n in df_deals.loc[closed, "Close Date Source"].value_counts(dropna=False).items():

@@ -49,7 +49,8 @@ The first real run creates the file; later runs overwrite it.
 
 ## The workbook
 
-**One sheet, `Deals`, one row per deal, and every row stands on its own** —
+**One sheet, `Deals`, one row per Lemon Law deal created this year — every
+one of them — and every row stands on its own** —
 no lookup tabs. Stage and owner come as names with their IDs beside them, and
 the stage's pipeline order and closed flag are on the row. Headers are
 HubSpot's property labels.
@@ -58,9 +59,13 @@ Columns:
 
 - Record ID, Deal Name, Pipeline
 - Deal Stage ID, Deal Stage, **Deal Stage Order** (pipeline order, for sorting
-  the funnel), **Deal Stage Is Closed**
-- **Close Date**, **Close Date Source** — filled for every deal whose stage
-  HubSpot marks closed, blank for open ones. HubSpot's own Close Date is never
+  the funnel), **Deal Stage Is Closed** — true for the three Settled stages,
+  Close Out, Retained - Drop Client and Retained - Client Dropped
+  (`CLOSED_STAGE_LABELS` in `main.py`). HubSpot's own closed flag is not used:
+  it marks only the Settled stages, so Close Out would read as open. A closed
+  label missing from the pipeline stops the run
+- **Close Date**, **Close Date Source** — filled for every closed deal, blank
+  for open ones. HubSpot's own Close Date is never
   set in this pipeline, so it comes from the firm's fields: **Date - Settled**
   for the Settled stages, **Date - Closed Out** (then Date - Close Out After
   Retained) for the rest, and the date the deal entered its current stage when

@@ -88,8 +88,8 @@ def test_add_stage_attributes_puts_order_and_closed_on_each_row():
     import pandas as pd
     df = pd.DataFrame({"Record ID": ["1", "2", "3"], "Deal Stage ID": ["a", "b", "zz"],
                        "Deal Stage": ["Intake", "Settled", "zz"], "X": [1, 2, 3]})
-    stages = [{"id": "a", "displayOrder": 0, "metadata": {"isClosed": "false"}},
-              {"id": "b", "displayOrder": 9, "metadata": {"isClosed": "true"}}]
+    stages = [{"id": "a", "label": "Intake", "displayOrder": 0},
+              {"id": "b", "label": "Close Out", "displayOrder": 9}]
     out = main.add_stage_attributes(df, stages)
     assert list(out.columns) == ["Record ID", "Deal Stage ID", "Deal Stage",
                                  "Deal Stage Order", "Deal Stage Is Closed", "X"]
@@ -114,6 +114,18 @@ def test_close_date_for_picks_the_field_that_matches_how_it_closed():
         (date(2026, 6, 1), "hs_v2_date_entered_current_stage")
     # Open: no close date even when a date field happens to be filled.
     assert main.close_date_for(settled, "Intake", False) == (None, None)
+
+
+def test_closed_stages_include_close_out_and_fail_when_renamed():
+    assert "Close Out" in main.CLOSED_STAGE_LABELS
+    everything = [{"label": l} for l in main.CLOSED_STAGE_LABELS]
+    main.check_closed_stages(everything)          # no exit
+    try:
+        main.check_closed_stages(everything[1:])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("a missing closed stage must stop the run")
 
 
 def test_unique_headers():
