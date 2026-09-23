@@ -85,6 +85,12 @@ Columns:
 - **Manufacturer** (full name, e.g. "General Motors LLC" — the one to match an
   opt-in / opt-out manufacturer list against), **Vehicle - Year**,
   **Vehicle - Model**
+- **AB 1755 (Manufacturer)** — right after Manufacturer: `Opt In`, `Opt Out`
+  or `Not on list`, from the published AB 1755 list (`AB1755_OPT_IN` /
+  `AB1755_OPT_OUT` in `main.py`, keyed on the stored manufacturer value).
+  Genesis files under Hyundai, Infiniti under Nissan; Isuzu has no value in
+  HubSpot. Checked against RO Review (Final Decision) on 2026 deals: 2 of 485
+  disagree
 - Lead - Source, Lead - Source (Group), Original Traffic Source, Original
   Traffic Source Drill-Down 1, Record source
 - **Channel detail** — what splits Prospect by channel, since Lead - Source

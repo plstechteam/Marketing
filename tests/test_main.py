@@ -144,6 +144,25 @@ def test_parse_number():
     assert main.parse_number("n/a") is None
 
 
+def test_ab1755_maps_stored_manufacturer_values():
+    assert main.ab1755_for("General Motors LLC") == "Opt In"
+    assert main.ab1755_for("Toyota Motor Sales, U.S.A., Inc. / Lexus") == "Opt Out"
+    assert main.ab1755_for("Winnebago Industries, Inc.") == "Not on list"
+    assert main.ab1755_for(None) is None
+    assert not (main.AB1755_OPT_IN & main.AB1755_OPT_OUT)
+
+
+def test_manufacturer_column_is_followed_by_ab1755():
+    props = ["hs_object_id", "s__manufacturer", "dealname"]
+    defs = {"s__manufacturer": {"label": "Manufacturer", "type": "enumeration",
+                                "options": [{"value": "Polestar", "label": "POLESTAR AUTOMOTIVE USA, INC."}]}}
+    deals = [{"id": "1", "properties": {"hs_object_id": "1", "s__manufacturer": "Polestar", "dealname": "x"}}]
+    df = main.build_deals_frame(deals, props, defs, {}, {}, "Lemon Law")
+    assert list(df.columns) == ["Record ID", "Manufacturer", main.AB1755_HEADER, "dealname"]
+    assert df.iloc[0]["Manufacturer"] == "POLESTAR AUTOMOTIVE USA, INC."
+    assert df.iloc[0][main.AB1755_HEADER] == "Opt Out"
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]

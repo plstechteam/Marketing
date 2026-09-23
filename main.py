@@ -121,6 +121,59 @@ CLOSED_STAGE_LABELS = {
     "Referred Out - Complete",
 }
 
+# AB 1755: which manufacturers opted in to California's new lemon law
+# procedure and which stayed out, from the firm's published list (September
+# 2026). Keyed on the STORED value of s__manufacturer — the full legal name —
+# not its label, so relabelling a dropdown option does not unmap it.
+# Brands the list names separately that HubSpot files under a parent:
+# Genesis -> Hyundai Motor America, Infiniti -> Nissan North America,
+# Mercedes -> Mercedes-Benz USA, Toyota/Lexus -> one value. Isuzu has no
+# manufacturer value in HubSpot. A manufacturer not listed here comes out as
+# "Not on list" — never guessed from a sister brand (Bentley and Lamborghini
+# are VW group but are not on the list).
+AB1755_OPT_IN = {
+    "FCA US LLC",
+    "Ford Motor Company",
+    "General Motors LLC",
+    "Hyundai Motor America",                  # Hyundai, Genesis
+    "Jaguar Land Rover North America, LLC",   # JLRNA
+    "Kia America, Inc.",
+    "Maserati North America, Inc.",
+    "Mercedes-Benz USA, LLC",
+    "Mitsubishi Motors North America, INC.",
+    "Nissan North America, Inc.",             # Nissan, Infiniti
+    "Subaru of America, Inc.",
+    "VinFast Auto, LLC",
+}
+AB1755_OPT_OUT = {
+    "Aston Martin Lagonda of North America, Inc.",
+    "BMW of North America, LLC",
+    "American Honda Motor Co., Inc.",
+    "Lucid Group, Inc.",
+    "Mazda Motor of America, Inc.",
+    "McLaren Automotive, Inc.",
+    "Polestar",
+    "Porsche Cars North America, Inc.",
+    "Rivian Automotive",
+    "TESLA MOTORS, INC.",
+    "Toyota Motor Sales, U.S.A., Inc. / Lexus",
+    "Volkswagen Group of America, Inc.",
+    "Volvo Car USA LLC",
+}
+AB1755_HEADER = "AB 1755 (Manufacturer)"
+
+
+def ab1755_for(manufacturer):
+    """Opt In / Opt Out / Not on list for a stored manufacturer value."""
+    if not manufacturer:
+        return None
+    if manufacturer in AB1755_OPT_IN:
+        return "Opt In"
+    if manufacturer in AB1755_OPT_OUT:
+        return "Opt Out"
+    return "Not on list"
+
+
 # Search stops paging at 10,000 results with no error — it simply stops
 # returning `after`. The year is well past that, so it is pulled a calendar
 # month at a time, and a month that reaches the ceiling aborts the run rather
@@ -320,6 +373,9 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
                 row[name] = parse_hubspot_datetime(raw)
             elif d.get("type") == "date":
                 row[name] = parse_hubspot_date(raw)
+            elif name == "s__manufacturer":
+                row[name] = label_value(raw, option_labels(d), owners)
+                row["s__manufacturer__ab1755"] = ab1755_for(raw)
             elif d.get("type") == "number":
                 row[name] = parse_number(raw)
             elif d.get("type") == "enumeration":
@@ -339,6 +395,8 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
         if name == "hs_object_id":
             label = "Record ID"
         columns.append((name, label))
+        if name == "s__manufacturer":
+            columns.append(("s__manufacturer__ab1755", AB1755_HEADER))
 
     df = pd.DataFrame(records, columns=[c for c, _ in columns])
     df.columns = unique_headers([(label, c) for c, label in columns])
@@ -685,6 +743,9 @@ def main():
               f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
         for src, n in df_deals.loc[closed, "Close Date Source"].value_counts(dropna=False).items():
             print(f"    {n:>6}  {src}")
+        print("DRY RUN: AB 1755 by manufacturer:")
+        for v, n in df_deals[AB1755_HEADER].value_counts(dropna=False).items():
+            print(f"    {n:>6}  {v}")
         print("DRY RUN: rows with a value, per column:")
         for col, n in filled.items():
             print(f"    {n:>6}  {col}")
