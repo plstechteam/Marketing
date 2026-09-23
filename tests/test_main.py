@@ -70,6 +70,9 @@ def test_close_date_for_picks_the_field_that_matches_how_it_closed():
     bare = {"hs_v2_date_entered_current_stage": "2026-06-01T12:00:00Z"}
     assert main.close_date_for(bare, "Settled - Lit", True) == \
         (date(2026, 6, 1), "hs_v2_date_entered_current_stage")
+    # Settled while still in a Retained stage: Date - Settled wins.
+    retained = {"date___settled": "2026-09-15", "hs_v2_date_entered_current_stage": "2026-08-01T12:00:00Z"}
+    assert main.close_date_for(retained, "Retained - Pre Lit", True) == (date(2026, 9, 15), "date___settled")
     referred = {"date___referred_out": "2026-04-09"}
     assert main.close_date_for(referred, "Referred Out - Complete", True) == \
         (date(2026, 4, 9), "date___referred_out")
@@ -140,7 +143,7 @@ def test_sheet_lookups_order_and_headers():
     sheet = main.to_sheet(df, defs, ["hs_v2_date_entered_5411633"])
     assert list(sheet.columns) == [
         "Record ID", "Deal Name", "Create Date",
-        "Deal Stage", "Deal Stage ID", "Deal Stage Order", "Deal Stage Is Closed",
+        "Deal Stage", "Deal Stage ID", "Deal Stage Order", "Is Closed", "Is Settled",
         "Close Date", "Close Date Source",
         "Lead - Source",
         "Manufacturer", main.AB1755_HEADER, "RO Review (Final Decision)",
@@ -151,7 +154,8 @@ def test_sheet_lookups_order_and_headers():
     row = sheet.iloc[0]
     assert row["Pipeline"] == "Lemon Law"
     assert row["Deal Stage"] == "Close Out" and row["Deal Stage ID"] == "5411635"
-    assert row["Deal Stage Order"] == 12 and row["Deal Stage Is Closed"] == True  # noqa: E712
+    assert row["Deal Stage Order"] == 12 and row["Is Closed"] == True  # noqa: E712
+    assert row["Is Settled"] == False  # noqa: E712
     assert row["Close Date"] == date(2026, 3, 5)
     assert row["Close Date Source"] == "Date - Closed Out"   # label, not internal name
     assert row["Deal Owner"] == "Ann Lee" and row["Deal Owner ID"] == "77"
@@ -244,6 +248,25 @@ def test_check_stored_allows_sharepoint_metadata_but_not_stale_or_truncated():
     assert "before" in main.check_stored({"size": 2994000, "lastModifiedDateTime": "2026-09-22T10:00:00Z"},
                                          2994000, started)
     assert main.check_stored({}, 2994000, started) is not None
+
+
+def test_settled_date_closes_a_deal_in_a_retained_stage():
+    stages = [{"id": "13404174", "label": "Retained - Pre Lit", "displayOrder": 8},
+              {"id": "5411633", "label": "Intake", "displayOrder": 0}]
+    deals = [
+        {"id": "1", "properties": {"dealstage": "13404174", "date___settled": "2026-09-15"}},
+        {"id": "2", "properties": {"dealstage": "13404174"}},
+        {"id": "3", "properties": {"dealstage": "5411633"}},
+    ]
+    defs = {"date___settled": {"type": "date"}}
+    df = main.build_deals_frame(deals, ["dealstage", "date___settled"], defs,
+                                {s["id"]: s["label"] for s in stages}, {}, "Lemon Law")
+    df = main.add_stage_attributes(df, stages)
+    df = main.add_close_date(df, deals, stages)
+    assert df["is_settled"].tolist() == [True, False, False]
+    assert df["dealstage__closed"].tolist() == [True, False, False]
+    assert df["close_date"].tolist() == [date(2026, 9, 15), None, None]
+    assert df["close_date_source"].tolist() == ["date___settled", None, None]
 
 
 def test_unique_headers():

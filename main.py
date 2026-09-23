@@ -10,12 +10,15 @@ import io
 import os
 import sys
 import time
+import zipfile
 from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytz
 import requests
 import xlsxwriter
+
+import splice
 
 # ======================================================
 # CONFIGURATION
@@ -448,7 +451,8 @@ FIXED_HEADERS = {
     "hs_object_id": "Record ID",
     "dealstage__id": "Deal Stage ID",
     "dealstage__order": "Deal Stage Order",
-    "dealstage__closed": "Deal Stage Is Closed",
+    "dealstage__closed": "Is Closed",
+    "is_settled": "Is Settled",
     "close_date": "Close Date",
     "close_date_source": "Close Date Source",
     "s__manufacturer__ab1755": AB1755_HEADER,
@@ -466,7 +470,7 @@ FIXED_HEADERS = {
 # stage, in pipeline order.
 COLUMN_GROUPS = [
     ("Deal", ["hs_object_id", "dealname", "legal_pipeline", "createdate"]),
-    ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed",
+    ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed", "is_settled",
                        "hs_v2_date_entered_current_stage", "close_date", "close_date_source"]),
     ("Source / channel", ["lead___source", "lead___source__group_", "hs_analytics_source",
                           "hs_analytics_source_data_1", "hs_object_source_label",
@@ -645,22 +649,34 @@ def graph_token(tenant_id, client_id, client_secret):
     return r.json()["access_token"]
 
 
-def check_destination(token):
-    """Confirm the target folder exists and say whether the file does yet."""
+def fetch_existing(token):
+    """(bytes, eTag) of the workbook in SharePoint, or (None, None) if it does
+    not exist yet. Also proves the folder is reachable."""
     headers = {"Authorization": f"Bearer {token}"}
-    folder = FILE_PATH.rsplit("/", 1)[0]
     base = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/"
+    folder = FILE_PATH.rsplit("/", 1)[0]
     r = request_with_retry("GET", base + folder, headers=headers)
     if r.status_code != 200:
         fail(f"SharePoint folder '{folder}': {r.status_code} — {r.text}")
-    print(f"SharePoint folder OK: {folder}")
     r = request_with_retry("GET", base + FILE_PATH, headers=headers)
-    if r.status_code == 200:
-        print(f"'{FILE_PATH}' exists ({r.json().get('size', 0) / 1024:.1f} KB) — a real run overwrites it")
-    elif r.status_code == 404:
-        print(f"'{FILE_PATH}' does not exist yet — the first real run creates it")
-    else:
+    if r.status_code == 404:
+        return None, None
+    if r.status_code != 200:
         fail(f"SharePoint file check: {r.status_code} — {r.text}")
+    etag = r.json().get("eTag")
+    r = request_with_retry("GET", base + FILE_PATH + ":/content", headers=headers,
+                           timeout=UPLOAD_TIMEOUT)
+    if r.status_code != 200:
+        fail(f"SharePoint download: {r.status_code} — {r.text}")
+    return r.content, etag
+
+
+def other_sheet_parts(xlsx_bytes, report):
+    """{part: bytes} for every worksheet part except the one this job owns."""
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as z:
+        return {n: z.read(n) for n in z.namelist()
+                if n.startswith("xl/worksheets/") and n.endswith(".xml")
+                and n != report["sheet_part"]}
 
 
 def check_stored(item, expected_size, started):
@@ -683,7 +699,7 @@ def check_stored(item, expected_size, started):
     return None
 
 
-def upload(workbook_bytes, token, expected_size):
+def upload(workbook_bytes, token, expected_size, etag=None):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{FILE_PATH}:/content"
     started = datetime.now(timezone.utc)
     r = request_with_retry(
@@ -691,10 +707,17 @@ def upload(workbook_bytes, token, expected_size):
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            # Only overwrite the version this run read. If someone saved the
+            # file in between (a change to Maz, say), SharePoint answers 412
+            # and their work stands; the next run starts from it.
+            **({"If-Match": etag} if etag else {}),
         },
         data=workbook_bytes,
         timeout=UPLOAD_TIMEOUT,
     )
+    if r.status_code == 412:
+        fail("upload: the workbook changed in SharePoint while this run was working — "
+             "nothing overwritten; the next run will pick up the new version.")
     if r.status_code not in (200, 201):
         fail(f"upload: {r.status_code} — {r.text}")
     # Graph answers with the stored file; make sure it is this run's.
@@ -713,8 +736,15 @@ def add_stage_attributes(df, stages):
     info = {s["id"]: s for s in stages}
     ids = df["dealstage__id"]
     df["dealstage__order"] = ids.map(lambda i: info[i].get("displayOrder") if i in info else None)
+    # A deal with a settlement date is settled, whatever stage it sits in:
+    # settled cases routinely stay in Retained - Lit / Retained - Pre Lit
+    # (all 31 of September 2026's settlements created this year did), and
+    # reading the stage alone showed them as open with no close date.
+    settled = df["date___settled"].notna() if "date___settled" in df.columns \
+        else pd.Series(False, index=df.index)
+    df["is_settled"] = settled
     df["dealstage__closed"] = ids.map(
-        lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None)
+        lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else False) | settled
     return df
 
 
@@ -735,6 +765,11 @@ def close_date_for(props, stage_label, is_closed):
     """
     if not is_closed:
         return None, None
+    # Date - Settled is what confirms a settlement, so it dates the close
+    # whenever it is filled — also for a settled deal still in a Retained
+    # stage.
+    if props.get("date___settled"):
+        return parse_hubspot_date(props["date___settled"]), "date___settled"
     if stage_label.lower().startswith("settled"):
         preferred = ["date___settled"]
     elif stage_label.lower().startswith("referred out"):
@@ -770,7 +805,7 @@ def add_close_date(df, deals, stages):
     for deal in deals:
         p = deal.get("properties", {})
         stage = info.get(p.get("dealstage"), {})
-        closed = stage.get("label") in CLOSED_STAGE_LABELS
+        closed = stage.get("label") in CLOSED_STAGE_LABELS or bool(p.get("date___settled"))
         d, src = close_date_for(p, stage.get("label", ""), closed)
         dates.append(d)
         sources.append(src)
@@ -892,25 +927,42 @@ def main():
     df_deals["last_refresh"] = refreshed
     df_deals = to_sheet(df_deals, definitions, stage_columns)
 
-    t0 = time.monotonic()
-    workbook = build_workbook(df_deals)
-    size_kb = len(workbook) / 1024
-    print(f"Workbook built: {size_kb:.0f} KB ({time.monotonic() - t0:.0f}s)")
-
     token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
     print("Graph token obtained OK")
 
+    # The workbook is shared: people keep their own tabs next to Deals (Maz
+    # was the first). Only the Deals sheet is replaced; every other part of
+    # the file is copied byte for byte — see splice.py.
+    t0 = time.monotonic()
+    existing, etag = fetch_existing(token)
+    if existing is None:
+        print(f"'{FILE_PATH}' does not exist yet — building it from scratch")
+        workbook, report = build_workbook(df_deals), None
+    else:
+        try:
+            workbook, report = splice.replace_sheet(existing, DEALS_SHEET, df_deals)
+        except splice.SpliceError as exc:
+            fail(f"cannot update '{DEALS_SHEET}' safely: {exc} — nothing written")
+        if not splice.untouched_parts_identical(existing, workbook, report):
+            fail("a part other than Deals would change — nothing written")
+        print(f"Sheets in the workbook: {', '.join(report['sheets'])}")
+        print(f"Replacing only '{DEALS_SHEET}' ({report['sheet_part']}); "
+              f"{len(report['untouched'])} other parts copied unchanged")
+    size_kb = len(workbook) / 1024
+    print(f"Workbook built: {size_kb:.0f} KB ({time.monotonic() - t0:.0f}s)")
+
     if DRY_RUN:
-        # A dry run still proves Graph can see the destination, so the first
-        # real run is not where a wrong drive, folder or permission shows up.
-        check_destination(token)
         # Counts only — deal names are client data and must not reach CI logs.
         print(f"DRY RUN: would upload {size_kb:.1f} KB to {FILE_PATH}")
         print(f"DRY RUN: one sheet '{DEALS_SHEET}', {len(df_deals)} rows x {len(df_deals.columns)} columns")
         # Fill rate per column — counts, no client data — so a dry run shows
         # which columns HubSpot actually populates.
         filled = df_deals.notna().sum()
-        closed = df_deals["Deal Stage Is Closed"] == True  # noqa: E712
+        closed = df_deals["Is Closed"] == True  # noqa: E712
+        settled = df_deals["Is Settled"] == True  # noqa: E712
+        print(f"DRY RUN: settled deals (Date - Settled filled) {int(settled.sum())}; by current stage:")
+        for stage, n in df_deals.loc[settled, "Deal Stage"].value_counts().items():
+            print(f"    {n:>6}  {stage}")
 
         print(f"DRY RUN: closed deals {int(closed.sum())}, with Close Date "
               f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
@@ -929,8 +981,18 @@ def main():
             print(f"    {n:>6}  {col}")
         return
 
-    status = upload(workbook, token, len(workbook))
+    status = upload(workbook, token, len(workbook), etag)
     print(f"File {'created' if status == 201 else 'uploaded'} ({size_kb:.1f} KB): {FILE_PATH}")
+
+    # Read it back and make sure every other tab arrived exactly as it was.
+    # This cannot undo an upload, but it turns a silent loss into a failed
+    # run — and SharePoint's version history can restore the previous file.
+    if report is not None:
+        stored, _ = fetch_existing(token)
+        if other_sheet_parts(stored, report) != other_sheet_parts(existing, report):
+            fail("the other tabs in SharePoint's copy differ from before the upload — "
+                 "check the file and restore the previous version from its version history")
+        print("Verified: every other tab in SharePoint is unchanged")
     print(f"Rows written: {len(df_deals)} x {len(df_deals.columns)} columns")
     print(f"Last Refresh: {refreshed:%B %d, %Y at %I:%M %p} Pacific")
 
