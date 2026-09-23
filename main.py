@@ -65,6 +65,16 @@ BASE_PROPERTIES = [
     "date___settled",               # Date - Settled — confirms the settlement
     "date___dropped",               # Date - Closed Out
     "date__intake_sign_up_close_out",   # Date - Close Out After Retained
+    "date___referred_out",          # Date - Referred Out
+    "date___ro_review",             # Date - RO Review
+    "hs_v2_date_exited_5792630",    # Date exited "New File Set Up - Doc Collection"
+    "total_settled_attorneys_fees_and_cost",
+    "net_attorney_fees",
+    # Vehicle. Manufacturer is the full legal name (s__manufacturer), not
+    # the short code, so it can be matched to the opt-in / opt-out list.
+    "s__manufacturer",
+    "vehicle___year",
+    "c__vehicle___model__new_test_",    # Vehicle - Model
     "lead___source",
     "lead___source__group_",
     "hs_analytics_source",
@@ -107,6 +117,8 @@ CLOSED_STAGE_LABELS = {
     "Close Out",
     "Retained - Drop Client",
     "Retained - Client Dropped",
+    # referred out and finished
+    "Referred Out - Complete",
 }
 
 # Search stops paging at 10,000 results with no error — it simply stops
@@ -241,6 +253,16 @@ def parse_hubspot_date(raw):
     return pd.Timestamp(str(raw)[:10]).date()
 
 
+def parse_number(raw):
+    """HubSpot number (sent as a string) -> float, None if blank or unreadable."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def stage_date_properties(stage_ids, definitions):
     """Pick one date column per stage: when the deal entered it, else when it
     exited it, else none.
@@ -298,6 +320,8 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
                 row[name] = parse_hubspot_datetime(raw)
             elif d.get("type") == "date":
                 row[name] = parse_hubspot_date(raw)
+            elif d.get("type") == "number":
+                row[name] = parse_number(raw)
             elif d.get("type") == "enumeration":
                 row[name] = label_value(raw, option_labels(d), owners)
             else:
@@ -502,6 +526,7 @@ def close_date_for(props, stage_label, is_closed):
     from the firm's own fields, the one that matches how it closed:
 
       Settled stages   Date - Settled, the date that confirms the settlement
+      Referred Out     Date - Referred Out
       any other closed Date - Closed Out, then Date - Close Out After Retained
 
     and, for a closed deal whose field is blank, the day it entered its
@@ -513,6 +538,8 @@ def close_date_for(props, stage_label, is_closed):
         return None, None
     if stage_label.lower().startswith("settled"):
         preferred = ["date___settled"]
+    elif stage_label.lower().startswith("referred out"):
+        preferred = ["date___referred_out"]
     else:
         preferred = ["date___dropped", "date__intake_sign_up_close_out"]
     for name in preferred:
@@ -597,8 +624,12 @@ def main():
     stage_labels = {s["id"]: s["label"] for s in stages}
     stage_candidates = [f"hs_v2_date_{kind}_{s['id']}"
                         for s in stages for kind in ("entered", "exited")]
-    definitions = fetch_property_definitions(BASE_PROPERTIES + stage_candidates, hs_headers)
+    definitions = fetch_property_definitions(
+        list(dict.fromkeys(BASE_PROPERTIES + stage_candidates)), hs_headers)
     stage_columns, skipped = stage_date_properties([s["id"] for s in stages], definitions)
+    # A stage date already in the fixed list (New File Set Up's exit date)
+    # must not come out as a second, identical column.
+    stage_columns = [c for c in stage_columns if c not in BASE_PROPERTIES]
     if skipped:
         print(f"Stages with no entered/exited date property in HubSpot (no column): "
               f"{', '.join(stage_labels[i] for i in skipped)}")

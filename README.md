@@ -60,15 +60,16 @@ Columns:
 - Record ID, Deal Name, Pipeline
 - Deal Stage ID, Deal Stage, **Deal Stage Order** (pipeline order, for sorting
   the funnel), **Deal Stage Is Closed** — true for the three Settled stages,
-  Close Out, Retained - Drop Client and Retained - Client Dropped
+  Close Out, Retained - Drop Client, Retained - Client Dropped and Referred
+  Out - Complete
   (`CLOSED_STAGE_LABELS` in `main.py`). HubSpot's own closed flag is not used:
   it marks only the Settled stages, so Close Out would read as open. A closed
   label missing from the pipeline stops the run
 - **Close Date**, **Close Date Source** — filled for every closed deal, blank
   for open ones. HubSpot's own Close Date is never
   set in this pipeline, so it comes from the firm's fields: **Date - Settled**
-  for the Settled stages, **Date - Closed Out** (then Date - Close Out After
-  Retained) for the rest, and the date the deal entered its current stage when
+  for the Settled stages, **Date - Referred Out** for Referred Out - Complete,
+  **Date - Closed Out** (then Date - Close Out After Retained) for the rest, and the date the deal entered its current stage when
   that field is blank. Close Date Source names the field used
 - Deal Owner ID, Deal Owner
 - **Intake - Case Supervisor**, **Senior Case Supervisor**, **Legal - Handling
@@ -76,7 +77,14 @@ Columns:
   the owner list
 - Create Date, Last Modified Date, Date entered current stage
 - **Case Category** (Lit / Pre-Lit), **Date - Settled**, Date - Closed Out,
-  Date - Close Out After Retained
+  Date - Close Out After Retained, Date - Referred Out
+- **Date - RO Review**, **Date exited "New File Set Up - Doc Collection"**
+  (the Lemon Law file set-up stage; there is no "New File Set Up - Intake"
+  in this pipeline)
+- **Total Settled Attorneys Fees and Cost**, **Net Attorney Fees** — numbers
+- **Manufacturer** (full name, e.g. "General Motors LLC" — the one to match an
+  opt-in / opt-out manufacturer list against), **Vehicle - Year**,
+  **Vehicle - Model**
 - Lead - Source, Lead - Source (Group), Original Traffic Source, Original
   Traffic Source Drill-Down 1, Record source
 - **Channel detail** — what splits Prospect by channel, since Lead - Source

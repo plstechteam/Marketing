@@ -117,6 +117,10 @@ def test_close_date_for_picks_the_field_that_matches_how_it_closed():
     bare = {"hs_v2_date_entered_current_stage": "2026-06-01T12:00:00Z"}
     assert main.close_date_for(bare, "Settled - Lit", True) == \
         (date(2026, 6, 1), "hs_v2_date_entered_current_stage")
+    referred = {"date___referred_out": "2026-04-09"}
+    assert main.close_date_for(referred, "Referred Out - Complete", True) == \
+        (date(2026, 4, 9), "date___referred_out")
+    assert "Referred Out - Complete" in main.CLOSED_STAGE_LABELS
     # Open: no close date even when a date field happens to be filled.
     assert main.close_date_for(settled, "Intake", False) == (None, None)
 
@@ -131,6 +135,13 @@ def test_closed_stages_include_close_out_and_fail_when_renamed():
         pass
     else:
         raise AssertionError("a missing closed stage must stop the run")
+
+
+def test_parse_number():
+    assert main.parse_number("5500") == 5500.0
+    assert main.parse_number("12.5") == 12.5
+    assert main.parse_number("") is None
+    assert main.parse_number("n/a") is None
 
 
 def test_unique_headers():
