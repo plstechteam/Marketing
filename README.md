@@ -163,8 +163,9 @@ What makes sure a run either lands complete or changes nothing:
 - Each month's pull must return exactly the count HubSpot reports, and none
   may reach the 10,000-result ceiling.
 - Every row must have a create date inside 1 January .. now.
-- After the upload, the size SharePoint reports storing must equal the
-  workbook the run built; otherwise the run fails.
+- After the upload, SharePoint's copy must have been modified by this upload
+  and be about the size sent (not exact: SharePoint writes a few KB of its
+  own metadata into Office files); otherwise the run fails.
 - Any of these failing stops the run **before or without** a partial write,
   and the previous file stays as it was — stale, never truncated.
 

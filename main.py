@@ -643,8 +643,29 @@ def check_destination(token):
         fail(f"SharePoint file check: {r.status_code} — {r.text}")
 
 
+def check_stored(item, expected_size, started):
+    """Did SharePoint keep this run's workbook? (None if yes, else why not.)
+
+    Not an exact size match: SharePoint writes its own metadata into Office
+    files as it stores them, so the stored file is a few KB larger than the
+    one uploaded (measured: 3,003,318 bytes stored for 2,994,000 sent). What
+    is checked instead is that the stored file was modified by this upload
+    and is about the size sent — a stale or truncated file fails both.
+    """
+    stored = item.get("size")
+    if not isinstance(stored, int) or not (0.95 * expected_size <= stored <= 1.10 * expected_size + 64 * 1024):
+        return f"SharePoint stored {stored} bytes for a {expected_size}-byte workbook"
+    modified = item.get("lastModifiedDateTime")
+    if not modified:
+        return "SharePoint returned no modification time"
+    if pd.Timestamp(modified) < pd.Timestamp(started) - pd.Timedelta(minutes=2):
+        return f"SharePoint's copy was last modified {modified}, before this upload"
+    return None
+
+
 def upload(workbook_bytes, token, expected_size):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{FILE_PATH}:/content"
+    started = datetime.now(timezone.utc)
     r = request_with_retry(
         "PUT", url,
         headers={
@@ -656,13 +677,10 @@ def upload(workbook_bytes, token, expected_size):
     )
     if r.status_code not in (200, 201):
         fail(f"upload: {r.status_code} — {r.text}")
-    # Graph answers with the stored file. Its size must be the workbook just
-    # built: anything else means SharePoint kept something other than this
-    # run's data, and the run fails rather than reporting a refresh that did
-    # not land.
-    stored = (r.json() or {}).get("size")
-    if stored != expected_size:
-        fail(f"upload: SharePoint stored {stored} bytes, expected {expected_size}")
+    # Graph answers with the stored file; make sure it is this run's.
+    problem = check_stored(r.json() or {}, expected_size, started)
+    if problem:
+        fail(f"upload: {problem}")
     return r.status_code
 
 
