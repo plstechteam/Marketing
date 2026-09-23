@@ -10,11 +10,12 @@ import io
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytz
 import requests
+import xlsxwriter
 
 # ======================================================
 # CONFIGURATION
@@ -33,9 +34,10 @@ DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 PIPELINE_ID = "default"          # Lemon Law. Employment Law is out of scope.
 
 PACIFIC = pytz.timezone("America/Los_Angeles")
-# Deal dates go out in Bogota time, as in the Monthly Settlement Report, so
-# the two workbooks agree on which day a deal belongs to.
-DEAL_TZ = pytz.timezone("America/Bogota")
+# Every date and time in the sheet is California time — deal dates, the
+# year's cut-off and Last Refresh alike — so a deal created at 11 PM on
+# 31 December in Los Angeles is a December deal, as the firm sees it.
+DEAL_TZ = PACIFIC
 
 # One sheet, and every row stands on its own: stage and owner come as names
 # (with their IDs beside them), and the stage's order and closed flag ride on
@@ -65,6 +67,16 @@ BASE_PROPERTIES = [
     "date___settled",               # Date - Settled — confirms the settlement
     "date___dropped",               # Date - Closed Out
     "date__intake_sign_up_close_out",   # Date - Close Out After Retained
+    "date___referred_out",          # Date - Referred Out
+    "date___ro_review",             # Date - RO Review
+    "hs_v2_date_exited_5792630",    # Date exited "New File Set Up - Doc Collection"
+    "total_settled_attorneys_fees_and_cost",
+    "net_attorney_fees",
+    # Vehicle. Manufacturer is the full legal name (s__manufacturer), not
+    # the short code, so it can be matched to the opt-in / opt-out list.
+    "s__manufacturer",
+    "vehicle___year",
+    "c__vehicle___model__new_test_",    # Vehicle - Model
     "lead___source",
     "lead___source__group_",
     "hs_analytics_source",
@@ -107,7 +119,62 @@ CLOSED_STAGE_LABELS = {
     "Close Out",
     "Retained - Drop Client",
     "Retained - Client Dropped",
+    # referred out and finished
+    "Referred Out - Complete",
 }
+
+# AB 1755: which manufacturers opted in to California's new lemon law
+# procedure and which stayed out, from the firm's published list (September
+# 2026). Keyed on the STORED value of s__manufacturer — the full legal name —
+# not its label, so relabelling a dropdown option does not unmap it.
+# Brands the list names separately that HubSpot files under a parent:
+# Genesis -> Hyundai Motor America, Infiniti -> Nissan North America,
+# Mercedes -> Mercedes-Benz USA, Toyota/Lexus -> one value. Isuzu has no
+# manufacturer value in HubSpot. A manufacturer not listed here comes out as
+# "Not on list" — never guessed from a sister brand (Bentley and Lamborghini
+# are VW group but are not on the list).
+AB1755_OPT_IN = {
+    "FCA US LLC",
+    "Ford Motor Company",
+    "General Motors LLC",
+    "Hyundai Motor America",                  # Hyundai, Genesis
+    "Jaguar Land Rover North America, LLC",   # JLRNA
+    "Kia America, Inc.",
+    "Maserati North America, Inc.",
+    "Mercedes-Benz USA, LLC",
+    "Mitsubishi Motors North America, INC.",
+    "Nissan North America, Inc.",             # Nissan, Infiniti
+    "Subaru of America, Inc.",
+    "VinFast Auto, LLC",
+}
+AB1755_OPT_OUT = {
+    "Aston Martin Lagonda of North America, Inc.",
+    "BMW of North America, LLC",
+    "American Honda Motor Co., Inc.",
+    "Lucid Group, Inc.",
+    "Mazda Motor of America, Inc.",
+    "McLaren Automotive, Inc.",
+    "Polestar",
+    "Porsche Cars North America, Inc.",
+    "Rivian Automotive",
+    "TESLA MOTORS, INC.",
+    "Toyota Motor Sales, U.S.A., Inc. / Lexus",
+    "Volkswagen Group of America, Inc.",
+    "Volvo Car USA LLC",
+}
+AB1755_HEADER = "AB 1755 (Manufacturer)"
+
+
+def ab1755_for(manufacturer):
+    """Opt In / Opt Out / Not on list for a stored manufacturer value."""
+    if not manufacturer:
+        return None
+    if manufacturer in AB1755_OPT_IN:
+        return "Opt In"
+    if manufacturer in AB1755_OPT_OUT:
+        return "Opt Out"
+    return "Not on list"
+
 
 # Search stops paging at 10,000 results with no error — it simply stops
 # returning `after`. The year is well past that, so it is pulled a calendar
@@ -241,6 +308,16 @@ def parse_hubspot_date(raw):
     return pd.Timestamp(str(raw)[:10]).date()
 
 
+def parse_number(raw):
+    """HubSpot number (sent as a string) -> float, None if blank or unreadable."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def stage_date_properties(stage_ids, definitions):
     """Pick one date column per stage: when the deal entered it, else when it
     exited it, else none.
@@ -274,10 +351,12 @@ def unique_headers(names):
 
 
 def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipeline_label):
-    """Raw deals -> one row per deal, HubSpot labels as headers.
+    """Raw deals -> one row per deal, columns keyed by HubSpot internal name.
 
     Only lookups happen here (stage id -> name, owner id -> name, enumeration
-    value -> label) and a timezone conversion on dates. No derived columns.
+    value -> label) and a timezone conversion on dates. Columns stay keyed by
+    internal name until to_sheet orders and labels them, so nothing
+    downstream depends on a label HubSpot could rename.
     """
     records = []
     for deal in deals:
@@ -298,26 +377,129 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
                 row[name] = parse_hubspot_datetime(raw)
             elif d.get("type") == "date":
                 row[name] = parse_hubspot_date(raw)
+            elif name == "s__manufacturer":
+                row[name] = label_value(raw, option_labels(d), owners)
+                row["s__manufacturer__ab1755"] = ab1755_for(raw)
+            elif d.get("type") == "number":
+                row[name] = parse_number(raw)
             elif d.get("type") == "enumeration":
                 row[name] = label_value(raw, option_labels(d), owners)
             else:
                 row[name] = raw if raw != "" else None
         records.append(row)
+    return pd.DataFrame(records)
 
-    columns = []
-    for name in properties:
-        label = (definitions.get(name, {}).get("label") or name).strip()
-        if name == "dealstage":
-            columns.append(("dealstage__id", "Deal Stage ID"))
-        if name == "hubspot_owner_id":
-            columns.append(("hubspot_owner_id__id", "Deal Owner ID"))
-            label = "Deal Owner"
-        if name == "hs_object_id":
-            label = "Record ID"
-        columns.append((name, label))
 
-    df = pd.DataFrame(records, columns=[c for c, _ in columns])
-    df.columns = unique_headers([(label, c) for c, label in columns])
+# Cycle times, in calendar days, computed on every run from that run's
+# dates — so a date corrected in HubSpot corrects its duration on the next
+# run. (key, header, from date, to date). "File Set Up" is the day the deal
+# left New File Set Up - Doc Collection.
+DURATIONS = [
+    ("days_created_to_ro_review", "Days: Created to RO Review",
+     "createdate", "date___ro_review"),
+    ("days_ro_review_to_file_set_up", "Days: RO Review to File Set Up",
+     "date___ro_review", "hs_v2_date_exited_5792630"),
+    ("days_created_to_file_set_up", "Days: Created to File Set Up",
+     "createdate", "hs_v2_date_exited_5792630"),
+    ("days_created_to_settled", "Days: Created to Settled",
+     "createdate", "date___settled"),
+]
+
+
+def days_between(start, end):
+    """Whole calendar days from start to end (date or datetime, both in the
+    sheet's timezone); None if either is missing. A negative result is kept:
+    it means the dates in HubSpot are out of order, which is worth seeing."""
+    if start is None or end is None or pd.isna(start) or pd.isna(end):
+        return None
+    to_date = lambda v: v.date() if isinstance(v, datetime) else v  # noqa: E731
+    return (to_date(end) - to_date(start)).days
+
+
+def add_durations(df):
+    for key, _, start, end in DURATIONS:
+        if start in df.columns and end in df.columns:
+            values = [days_between(a, b) for a, b in zip(df[start], df[end])]
+        else:
+            values = [None] * len(df)
+        df[key] = pd.array(values, dtype="Int64")
+    return df
+
+
+# Headers for the columns this script adds or renames; everything else is
+# headed by its HubSpot label.
+FIXED_HEADERS = {
+    "hs_object_id": "Record ID",
+    "dealstage__id": "Deal Stage ID",
+    "dealstage__order": "Deal Stage Order",
+    "dealstage__closed": "Deal Stage Is Closed",
+    "close_date": "Close Date",
+    "close_date_source": "Close Date Source",
+    "s__manufacturer__ab1755": AB1755_HEADER,
+    "hubspot_owner_id": "Deal Owner",
+    "hubspot_owner_id__id": "Deal Owner ID",
+    "last_refresh": "Last Refresh",
+    **{key: header for key, header, _, _ in DURATIONS},
+}
+
+# Sheet layout, left to right in the order the funnel reads: who the deal is,
+# where it stands now, where it came from, what vehicle and AB 1755 side it
+# is on, the milestones on the way, how it ended, who is on it, and the full
+# stage history. "STAGE_HISTORY" expands to one date column per pipeline
+# stage, in pipeline order.
+COLUMN_GROUPS = [
+    ("Deal", ["hs_object_id", "dealname", "legal_pipeline", "createdate"]),
+    ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed",
+                       "hs_v2_date_entered_current_stage", "close_date", "close_date_source"]),
+    ("Source / channel", ["lead___source", "lead___source__group_", "hs_analytics_source",
+                          "hs_analytics_source_data_1", "hs_object_source_label",
+                          "aircall_entry_number", "auto_dialer_call_type",
+                          "tf__utm_source", "tf__utm_medium", "tf__utm_campaign", "gclid"]),
+    ("Vehicle / AB 1755", ["s__manufacturer", "s__manufacturer__ab1755",
+                           "ro_review__final_decision_", "vehicle___year",
+                           "c__vehicle___model__new_test_"]),
+    ("Milestones", ["date___ro_review", "hs_v2_date_exited_5792630", "date___referred_out"]),
+    ("Outcome", ["case_category", "date___settled", "total_settled_attorneys_fees_and_cost",
+                 "net_attorney_fees", "drop_reason", "date___dropped",
+                 "date__intake_sign_up_close_out", "deal_stage___sub_phase"]),
+    ("Cycle time (days)", [key for key, _, _, _ in DURATIONS]),
+    ("People", ["hubspot_owner_id", "hubspot_owner_id__id", "n5__retainer_representative",
+                "senior_case_supervisor", "handling_attorney", "supervising_attorney"]),
+    ("Stage history", ["STAGE_HISTORY"]),
+    ("Audit", ["pipeline", "hs_lastmodifieddate", "last_refresh"]),
+]
+
+
+def column_order(columns, stage_columns):
+    """Internal column keys in sheet order. A column no group names (a
+    property added to BASE_PROPERTIES but not placed) goes just before
+    Audit rather than being dropped."""
+    ordered = []
+    for group, keys in COLUMN_GROUPS:
+        if group == "Audit":
+            placed = set(ordered) | set(keys)
+            ordered += [c for c in columns if c not in placed]
+        for key in keys:
+            if key == "STAGE_HISTORY":
+                ordered += [c for c in stage_columns if c in columns]
+            elif key in columns:
+                ordered.append(key)
+    return list(dict.fromkeys(ordered))
+
+
+def header_for(key, definitions):
+    return FIXED_HEADERS.get(key) or (definitions.get(key, {}).get("label") or key).strip()
+
+
+def to_sheet(df, definitions, stage_columns):
+    """Order the columns by COLUMN_GROUPS and head them with labels. Close
+    Date Source is written as the label of the field used, so the row says
+    "Date - Settled" rather than an internal name."""
+    df = df[column_order(list(df.columns), stage_columns)].copy()
+    if "close_date_source" in df.columns:
+        df["close_date_source"] = df["close_date_source"].map(
+            lambda k: header_for(k, definitions) if k else None)
+    df.columns = unique_headers([(header_for(c, definitions), c) for c in df.columns])
     return df
 
 
@@ -461,7 +643,7 @@ def check_destination(token):
         fail(f"SharePoint file check: {r.status_code} — {r.text}")
 
 
-def upload(workbook_bytes, token):
+def upload(workbook_bytes, token, expected_size):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{FILE_PATH}:/content"
     r = request_with_retry(
         "PUT", url,
@@ -474,6 +656,13 @@ def upload(workbook_bytes, token):
     )
     if r.status_code not in (200, 201):
         fail(f"upload: {r.status_code} — {r.text}")
+    # Graph answers with the stored file. Its size must be the workbook just
+    # built: anything else means SharePoint kept something other than this
+    # run's data, and the run fails rather than reporting a refresh that did
+    # not land.
+    stored = (r.json() or {}).get("size")
+    if stored != expected_size:
+        fail(f"upload: SharePoint stored {stored} bytes, expected {expected_size}")
     return r.status_code
 
 
@@ -481,17 +670,13 @@ def upload(workbook_bytes, token):
 # WORKBOOK
 # ======================================================
 def add_stage_attributes(df, stages):
-    """Put the stage's pipeline order and closed flag on every row, right
-    after Deal Stage, so the funnel can be sorted without a lookup table."""
+    """The stage's pipeline order and closed flag on every row, so the funnel
+    can be sorted and filtered without a lookup table."""
     info = {s["id"]: s for s in stages}
-    ids = df["Deal Stage ID"]
-    # Positioned off "Deal Stage ID", which this script names, not off the
-    # stage column whose header is HubSpot's label and could be renamed.
-    at = df.columns.get_loc("Deal Stage ID") + 2
-    df.insert(at, "Deal Stage Order",
-              ids.map(lambda i: info[i].get("displayOrder") if i in info else None))
-    df.insert(at + 1, "Deal Stage Is Closed",
-              ids.map(lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None))
+    ids = df["dealstage__id"]
+    df["dealstage__order"] = ids.map(lambda i: info[i].get("displayOrder") if i in info else None)
+    df["dealstage__closed"] = ids.map(
+        lambda i: info[i]["label"] in CLOSED_STAGE_LABELS if i in info else None)
     return df
 
 
@@ -502,6 +687,7 @@ def close_date_for(props, stage_label, is_closed):
     from the firm's own fields, the one that matches how it closed:
 
       Settled stages   Date - Settled, the date that confirms the settlement
+      Referred Out     Date - Referred Out
       any other closed Date - Closed Out, then Date - Close Out After Retained
 
     and, for a closed deal whose field is blank, the day it entered its
@@ -513,6 +699,8 @@ def close_date_for(props, stage_label, is_closed):
         return None, None
     if stage_label.lower().startswith("settled"):
         preferred = ["date___settled"]
+    elif stage_label.lower().startswith("referred out"):
+        preferred = ["date___referred_out"]
     else:
         preferred = ["date___dropped", "date__intake_sign_up_close_out"]
     for name in preferred:
@@ -534,7 +722,7 @@ def check_closed_stages(stages):
 
 
 def add_close_date(df, deals, stages):
-    """Close Date and Close Date Source, right after Deal Stage Is Closed.
+    """Close Date and Close Date Source for every row.
 
     Relies on df having one row per deal in the order of `deals`, which is
     how build_deals_frame builds it.
@@ -548,18 +736,46 @@ def add_close_date(df, deals, stages):
         d, src = close_date_for(p, stage.get("label", ""), closed)
         dates.append(d)
         sources.append(src)
-    at = df.columns.get_loc("Deal Stage Is Closed") + 1
-    df.insert(at, "Close Date", dates)
-    df.insert(at + 1, "Close Date Source", sources)
+    df["close_date"] = dates
+    df["close_date_source"] = sources
     return df
 
 
 def build_workbook(df_deals):
+    """Write the sheet with xlsxwriter, row by row.
+
+    About 4x faster than pandas + openpyxl on this sheet (18,000 x 67: ~6s
+    against ~25s, measured) and a smaller file. Row by row is what lets
+    constant_memory stream each row out as it is written — do NOT swap this
+    for pandas' to_excel with constant_memory: pandas writes column by column,
+    and in that mode xlsxwriter silently drops everything but the first
+    column (measured: a 100 KB file).
+
+    Every text value goes through write_string, so a value that starts with
+    "=" stays text and is never evaluated as a formula.
+    """
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl",
-                        datetime_format="yyyy-mm-dd hh:mm:ss",
-                        date_format="yyyy-mm-dd") as writer:
-        df_deals.to_excel(writer, sheet_name=DEALS_SHEET, index=False)
+    wb = xlsxwriter.Workbook(buf, {"in_memory": True, "constant_memory": True})
+    ws = wb.add_worksheet(DEALS_SHEET)
+    fmt_datetime = wb.add_format({"num_format": "yyyy-mm-dd hh:mm:ss"})
+    fmt_date = wb.add_format({"num_format": "yyyy-mm-dd"})
+    ws.write_row(0, 0, [str(c) for c in df_deals.columns])
+    values = df_deals.astype(object).where(df_deals.notna(), None)
+    for r, row in enumerate(values.itertuples(index=False, name=None), start=1):
+        for c, v in enumerate(row):
+            if v is None:
+                continue
+            if isinstance(v, datetime):
+                ws.write_datetime(r, c, v, fmt_datetime)
+            elif isinstance(v, date):
+                ws.write_datetime(r, c, datetime(v.year, v.month, v.day), fmt_date)
+            elif isinstance(v, bool):
+                ws.write_boolean(r, c, v)
+            elif isinstance(v, (int, float)):
+                ws.write_number(r, c, v)
+            else:
+                ws.write_string(r, c, str(v))
+    wb.close()
     return buf.getvalue()
 
 
@@ -577,10 +793,9 @@ def main():
     print(f"Run started: {now_pacific.strftime('%Y-%m-%d %I:%M %p %Z')}")
 
     # The window moves on its own: 1 January of the year the run happens in.
-    # It is cut on the same Bogota clock the deal dates are written in, so the
-    # sheet's first Create Date is 1 January and every month in Power BI is
-    # complete — a Pacific cut would drop the deals created in the last hours
-    # of 31 December Pacific, which the sheet shows as 1 January.
+    # It is cut on the same California clock the deal dates are written in,
+    # so the sheet's first Create Date is 1 January and every month in Power
+    # BI is complete.
     now_deal_tz = now_pacific.astimezone(DEAL_TZ)
     year_start = DEAL_TZ.localize(datetime(now_deal_tz.year, 1, 1))
     windows = month_windows(year_start, now_deal_tz)
@@ -597,8 +812,12 @@ def main():
     stage_labels = {s["id"]: s["label"] for s in stages}
     stage_candidates = [f"hs_v2_date_{kind}_{s['id']}"
                         for s in stages for kind in ("entered", "exited")]
-    definitions = fetch_property_definitions(BASE_PROPERTIES + stage_candidates, hs_headers)
+    definitions = fetch_property_definitions(
+        list(dict.fromkeys(BASE_PROPERTIES + stage_candidates)), hs_headers)
     stage_columns, skipped = stage_date_properties([s["id"] for s in stages], definitions)
+    # A stage date already in the fixed list (New File Set Up's exit date)
+    # must not come out as a second, identical column.
+    stage_columns = [c for c in stage_columns if c not in BASE_PROPERTIES]
     if skipped:
         print(f"Stages with no entered/exited date property in HubSpot (no column): "
               f"{', '.join(stage_labels[i] for i in skipped)}")
@@ -607,8 +826,9 @@ def main():
     print(f"Owners loaded: {len(owners)}")
 
     print(f"Pulling deals created {year_start:%Y-%m-%d} to now, one month at a time:")
+    t0 = time.monotonic()
     deals = fetch_deals(properties, windows, hs_headers)
-    print(f"Total deals: {len(deals)}")
+    print(f"Total deals: {len(deals)} ({time.monotonic() - t0:.0f}s)")
     if not deals:
         fail("HubSpot returned no deals — refusing to write an empty report.")
 
@@ -629,11 +849,15 @@ def main():
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
+    df_deals = add_durations(df_deals)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
-    df_deals["Last Refresh"] = refreshed
+    df_deals["last_refresh"] = refreshed
+    df_deals = to_sheet(df_deals, definitions, stage_columns)
 
+    t0 = time.monotonic()
     workbook = build_workbook(df_deals)
     size_kb = len(workbook) / 1024
+    print(f"Workbook built: {size_kb:.0f} KB ({time.monotonic() - t0:.0f}s)")
 
     token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
     print("Graph token obtained OK")
@@ -654,12 +878,20 @@ def main():
               f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
         for src, n in df_deals.loc[closed, "Close Date Source"].value_counts(dropna=False).items():
             print(f"    {n:>6}  {src}")
+        print("DRY RUN: cycle times (days) — rows, median, negative:")
+        for _, header, _, _ in DURATIONS:
+            col = df_deals[header].dropna()
+            median = f"{col.median():.0f}" if len(col) else "-"
+            print(f"    {header}: {len(col)} rows, median {median}, negative {int((col < 0).sum())}")
+        print("DRY RUN: AB 1755 by manufacturer:")
+        for v, n in df_deals[AB1755_HEADER].value_counts(dropna=False).items():
+            print(f"    {n:>6}  {v}")
         print("DRY RUN: rows with a value, per column:")
         for col, n in filled.items():
             print(f"    {n:>6}  {col}")
         return
 
-    status = upload(workbook, token)
+    status = upload(workbook, token, len(workbook))
     print(f"File {'created' if status == 201 else 'uploaded'} ({size_kb:.1f} KB): {FILE_PATH}")
     print(f"Rows written: {len(df_deals)} x {len(df_deals.columns)} columns")
     print(f"Last Refresh: {refreshed:%B %d, %Y at %I:%M %p} Pacific")
