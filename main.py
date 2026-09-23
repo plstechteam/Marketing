@@ -388,6 +388,42 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
     return pd.DataFrame(records)
 
 
+# Cycle times, in calendar days, computed on every run from that run's
+# dates — so a date corrected in HubSpot corrects its duration on the next
+# run. (key, header, from date, to date). "File Set Up" is the day the deal
+# left New File Set Up - Doc Collection.
+DURATIONS = [
+    ("days_created_to_ro_review", "Days: Created to RO Review",
+     "createdate", "date___ro_review"),
+    ("days_ro_review_to_file_set_up", "Days: RO Review to File Set Up",
+     "date___ro_review", "hs_v2_date_exited_5792630"),
+    ("days_created_to_file_set_up", "Days: Created to File Set Up",
+     "createdate", "hs_v2_date_exited_5792630"),
+    ("days_created_to_settled", "Days: Created to Settled",
+     "createdate", "date___settled"),
+]
+
+
+def days_between(start, end):
+    """Whole calendar days from start to end (date or datetime, both in the
+    sheet's timezone); None if either is missing. A negative result is kept:
+    it means the dates in HubSpot are out of order, which is worth seeing."""
+    if start is None or end is None or pd.isna(start) or pd.isna(end):
+        return None
+    to_date = lambda v: v.date() if isinstance(v, datetime) else v  # noqa: E731
+    return (to_date(end) - to_date(start)).days
+
+
+def add_durations(df):
+    for key, _, start, end in DURATIONS:
+        if start in df.columns and end in df.columns:
+            values = [days_between(a, b) for a, b in zip(df[start], df[end])]
+        else:
+            values = [None] * len(df)
+        df[key] = pd.array(values, dtype="Int64")
+    return df
+
+
 # Headers for the columns this script adds or renames; everything else is
 # headed by its HubSpot label.
 FIXED_HEADERS = {
@@ -401,6 +437,7 @@ FIXED_HEADERS = {
     "hubspot_owner_id": "Deal Owner",
     "hubspot_owner_id__id": "Deal Owner ID",
     "last_refresh": "Last Refresh",
+    **{key: header for key, header, _, _ in DURATIONS},
 }
 
 # Sheet layout, left to right in the order the funnel reads: who the deal is,
@@ -423,6 +460,7 @@ COLUMN_GROUPS = [
     ("Outcome", ["case_category", "date___settled", "total_settled_attorneys_fees_and_cost",
                  "net_attorney_fees", "drop_reason", "date___dropped",
                  "date__intake_sign_up_close_out", "deal_stage___sub_phase"]),
+    ("Cycle time (days)", [key for key, _, _, _ in DURATIONS]),
     ("People", ["hubspot_owner_id", "hubspot_owner_id__id", "n5__retainer_representative",
                 "senior_case_supervisor", "handling_attorney", "supervising_attorney"]),
     ("Stage history", ["STAGE_HISTORY"]),
@@ -780,6 +818,7 @@ def main():
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
+    df_deals = add_durations(df_deals)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
     df_deals["last_refresh"] = refreshed
     df_deals = to_sheet(df_deals, definitions, stage_columns)
@@ -806,6 +845,11 @@ def main():
               f"{int(df_deals.loc[closed, 'Close Date'].notna().sum())}; by source:")
         for src, n in df_deals.loc[closed, "Close Date Source"].value_counts(dropna=False).items():
             print(f"    {n:>6}  {src}")
+        print("DRY RUN: cycle times (days) — rows, median, negative:")
+        for _, header, _, _ in DURATIONS:
+            col = df_deals[header].dropna()
+            median = f"{col.median():.0f}" if len(col) else "-"
+            print(f"    {header}: {len(col)} rows, median {median}, negative {int((col < 0).sum())}")
         print("DRY RUN: AB 1755 by manufacturer:")
         for v, n in df_deals[AB1755_HEADER].value_counts(dropna=False).items():
             print(f"    {n:>6}  {v}")

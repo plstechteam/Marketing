@@ -166,6 +166,30 @@ def test_every_base_property_has_a_place_in_the_layout():
     assert set(main.FIXED_HEADERS) <= placed
 
 
+def test_durations_are_calendar_days_and_blank_when_a_date_is_missing():
+    import pandas as pd
+    assert main.days_between(datetime(2026, 1, 1, 23, 0), date(2026, 1, 3)) == 2
+    assert main.days_between(date(2026, 1, 3), datetime(2026, 1, 1, 1, 0)) == -2
+    assert main.days_between(None, date(2026, 1, 3)) is None
+    df = pd.DataFrame({
+        "createdate": [datetime(2026, 1, 1, 9), datetime(2026, 2, 1, 9)],
+        "date___ro_review": [date(2026, 1, 11), None],
+        "hs_v2_date_exited_5792630": [datetime(2026, 1, 21, 15), None],
+        "date___settled": [date(2026, 5, 1), None],
+    })
+    out = main.add_durations(df)
+    assert out["days_created_to_ro_review"].tolist()[0] == 10
+    assert out["days_ro_review_to_file_set_up"].tolist()[0] == 10
+    assert out["days_created_to_file_set_up"].tolist()[0] == 20
+    assert out["days_created_to_settled"].tolist()[0] == 120
+    assert out["days_created_to_ro_review"].isna().tolist() == [False, True]
+
+
+def test_headers_are_english_ascii():
+    for header in main.FIXED_HEADERS.values():
+        assert header.isascii(), header
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]

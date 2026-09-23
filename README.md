@@ -6,9 +6,10 @@ from HubSpot and writes it, raw, to `Marketing.xlsx` in SharePoint
 the Microsoft Graph API. The workbook is the source for the Power BI
 marketing funnel.
 
-**Nothing is calculated in the workbook.** The funnel buckets (Prospect,
-Lead, MQL, SQL, Closed Won, Closed Lost), the opt-in / opt-out split and every
-rate live in Power BI. The script only does lookups — stage id → name, owner
+**Almost nothing is calculated in the workbook.** The funnel buckets
+(Prospect, Lead, MQL, SQL, Closed Won, Closed Lost) and every rate live in
+Power BI. The exceptions are per-deal values: the Close Date, the AB 1755
+side and the four cycle times, all recomputed on every run. The script only does lookups — stage id → name, owner
 id → name, dropdown value → the label HubSpot shows — and converts dates to
 `America/Bogota`, as the Settlement report does.
 
@@ -66,6 +67,7 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 | **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
 | **Milestones** | Date - RO Review, Date exited "New File Set Up - Doc Collection", Date - Referred Out |
 | **Outcome** | Case Category, Date - Settled, Total Settled Attorneys Fees and Cost, Net Attorney Fees, Close Out Reason, Date - Closed Out, Date - Close Out After Retained, Legal Sub Phase |
+| **Cycle time (days)** | Days: Created to RO Review, Days: RO Review to File Set Up, Days: Created to File Set Up, Days: Created to Settled |
 | **People** | Deal Owner, Deal Owner ID, Intake - Case Supervisor, Senior Case Supervisor, Legal - Handling Attorney, Settlement Attorney |
 | **Stage history** | Date entered "<stage>" for every stage, in pipeline order |
 | **Audit** | Pipeline, Last Modified Date, Last Refresh |
@@ -99,7 +101,21 @@ still comes out, just before Audit — and a test fails until it is placed.
   Referred Out and TEST get no column. Their deals are still in the sheet.
 - There is no "New File Set Up - Intake" stage in this pipeline; the file
   set-up stage is "New File Set Up - Doc Collection".
-- Fees are written as numbers; dates in Bogota time; Last Refresh in Pacific.
+- **Cycle time (days)** — whole calendar days between two of the row's own
+  dates (`DURATIONS` in `main.py`):
+  - Created to RO Review: Create Date -> Date - RO Review
+  - RO Review to File Set Up: Date - RO Review -> Date exited "New File Set
+    Up - Doc Collection"
+  - Created to File Set Up: Create Date -> Date exited "New File Set Up - Doc
+    Collection"
+  - Created to Settled: Create Date -> Date - Settled
+
+  Blank when either date is missing. A negative value is kept — it means the
+  dates in HubSpot are out of order — and the dry run counts them. Recomputed
+  from scratch every run, so a corrected date corrects its duration.
+- All headers are in English.
+- Fees and cycle times are written as numbers; dates in Bogota time; Last
+  Refresh in Pacific.
 
 **Left out because HubSpot never fills them** on this year's Lemon Law deals
 (measured on all 18,111 in September 2026): Close Date, Intake Outcome, Class
