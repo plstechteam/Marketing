@@ -385,17 +385,23 @@ def parse_hubspot_datetime(raw):
     """HubSpot datetime (ISO string, UTC) -> naive datetime in DEAL_TZ."""
     if raw is None or raw == "":
         return None
-    ts = pd.Timestamp(raw)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    return ts.tz_convert(DEAL_TZ).tz_localize(None).to_pydatetime()
+    try:   # the standard library is ~10x faster than pandas here
+        dt = datetime.fromisoformat(str(raw))
+    except ValueError:
+        dt = pd.Timestamp(raw).to_pydatetime()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(DEAL_TZ).replace(tzinfo=None)
 
 
 def parse_hubspot_date(raw):
     """HubSpot date property ('YYYY-MM-DD' or midnight-UTC ISO) -> date."""
     if raw is None or raw == "":
         return None
-    return pd.Timestamp(str(raw)[:10]).date()
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return pd.Timestamp(str(raw)[:10]).date()
 
 
 def parse_number(raw):
@@ -448,34 +454,52 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
     internal name until to_sheet orders and labels them, so nothing
     downstream depends on a label HubSpot could rename.
     """
+    # One handler per property, resolved once; each row starts all-blank and
+    # only the properties a deal actually has are visited (most are blank).
+    template, handlers = {}, {}
+    for name in properties:
+        d = definitions.get(name, {})
+        kind = d.get("type")
+        if name == "pipeline":
+            template[name] = None
+            handlers[name] = lambda raw: {"pipeline": pipeline_label if raw == PIPELINE_ID else raw}
+        elif name == "dealstage":
+            template["dealstage__id"] = template[name] = None
+            handlers[name] = lambda raw: {"dealstage__id": raw, "dealstage": stage_labels.get(raw, raw)}
+        elif name == "hubspot_owner_id":
+            template["hubspot_owner_id__id"] = template[name] = None
+            handlers[name] = lambda raw: {"hubspot_owner_id__id": raw,
+                                          "hubspot_owner_id": owners.get(str(raw), raw) if raw else None}
+        elif kind == "datetime":
+            template[name] = None
+            handlers[name] = lambda raw, n=name: {n: parse_hubspot_datetime(raw)}
+        elif kind == "date":
+            template[name] = None
+            handlers[name] = lambda raw, n=name: {n: parse_hubspot_date(raw)}
+        elif name == "s__manufacturer":
+            template[name] = None
+            template["s__manufacturer__ab1755"] = ab1755_for(None)
+            labels = option_labels(d)
+            handlers[name] = lambda raw, lb=labels: {"s__manufacturer": label_value(raw, lb, owners),
+                                                     "s__manufacturer__ab1755": ab1755_for(raw)}
+        elif kind == "number":
+            template[name] = None
+            handlers[name] = lambda raw, n=name: {n: parse_number(raw)}
+        elif kind == "enumeration":
+            template[name] = None
+            labels = option_labels(d)
+            handlers[name] = lambda raw, n=name, lb=labels: {n: label_value(raw, lb, owners)}
+        else:
+            template[name] = None
+            handlers[name] = lambda raw, n=name: {n: raw if raw != "" else None}
+
     records = []
     for deal in deals:
-        p = deal.get("properties", {})
-        row = {}
-        for name in properties:
-            raw = p.get(name)
-            d = definitions.get(name, {})
-            if name == "pipeline":
-                row[name] = pipeline_label if raw == PIPELINE_ID else raw
-            elif name == "dealstage":
-                row["dealstage__id"] = raw
-                row[name] = stage_labels.get(raw, raw)
-            elif name == "hubspot_owner_id":
-                row["hubspot_owner_id__id"] = raw
-                row[name] = owners.get(str(raw), raw) if raw else None
-            elif d.get("type") == "datetime":
-                row[name] = parse_hubspot_datetime(raw)
-            elif d.get("type") == "date":
-                row[name] = parse_hubspot_date(raw)
-            elif name == "s__manufacturer":
-                row[name] = label_value(raw, option_labels(d), owners)
-                row["s__manufacturer__ab1755"] = ab1755_for(raw)
-            elif d.get("type") == "number":
-                row[name] = parse_number(raw)
-            elif d.get("type") == "enumeration":
-                row[name] = label_value(raw, option_labels(d), owners)
-            else:
-                row[name] = raw if raw != "" else None
+        row = dict(template)
+        for name, raw in deal.get("properties", {}).items():
+            handler = handlers.get(name)
+            if handler is not None and raw is not None:
+                row.update(handler(raw))
         records.append(row)
     return pd.DataFrame(records)
 
@@ -1313,7 +1337,7 @@ def build_workbook(df_deals):
     return buf.getvalue()
 
 
-def preview_other_tabs(xlsx_bytes, refs, max_row=12):
+def preview_other_tabs(xlsx_bytes, refs, max_row=3):
     """Dry run only: the labels and formulas at the top of each tab that reads
     Deals, so a log shows what those formulas were built to read. Prints
     literal text and formulas only — never a formula's cached result, which
@@ -1463,14 +1487,17 @@ def main():
             fail("a part other than Deals would change — nothing written")
         # Formulas in other tabs read Deals by column letter; make sure every
         # column they read keeps its header.
-        refs = splice.referenced_columns(existing, DEALS_SHEET)
-        old_headers = splice.header_row(existing, DEALS_SHEET)
-        if refs:
-            print(f"Other tabs read {len(refs)} Deals column(s): " + "; ".join(
-                f"{col} ({old_headers.get(col, '?')}) <- {len(w)} formula(s), e.g. {', '.join(w[:3])}"
-                for col, w in sorted(refs.items(), key=lambda kv: splice.column_index(kv[0]))))
-        if DRY_RUN and refs:
-            preview_other_tabs(existing, refs)
+        # (The full list of what they read is only worked out on dry runs —
+        # scanning ~230,000 formulas takes a while, and a real run only needs
+        # it when a header moves, which shifted_references checks first.)
+        if DRY_RUN:
+            refs = splice.referenced_columns(existing, DEALS_SHEET)
+            old_headers = splice.header_row(existing, DEALS_SHEET)
+            if refs:
+                print(f"Other tabs read {len(refs)} Deals column(s): " + "; ".join(
+                    f"{col} ({old_headers.get(col, '?')}) <- {len(w)} formula(s), e.g. {', '.join(w[:3])}"
+                    for col, w in sorted(refs.items(), key=lambda kv: splice.column_index(kv[0]))))
+                preview_other_tabs(existing, refs)
         shifts = splice.shifted_references(existing, workbook, DEALS_SHEET)
         if shifts:
             for col, where, before, after in shifts:
