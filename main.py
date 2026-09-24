@@ -36,6 +36,12 @@ DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 PIPELINE_ID = "default"          # Lemon Law. Employment Law is out of scope.
 
+# Lemon Law - State values kept. A handful of deals in the Lemon Law pipeline
+# are marked "Employment Law" (12 in September 2026); they are not Lemon Law
+# cases and are dropped, as the Monthly Settlement Report drops them. Stored
+# values, not labels.
+ALLOWED_STATES = {"LEMON LAW (CA)", "LEMON LAW (WA)"}
+
 # The whole history is pulled — marketing is compared year against year — so
 # the pull starts at the firm's first Lemon Law deal in HubSpot (18 April
 # 2021) and runs to now. Monthly windows from HISTORY_START; one extra window
@@ -179,9 +185,10 @@ AB1755_HEADER = "AB 1755 (Manufacturer)"
 
 
 def ab1755_for(manufacturer):
-    """Opt In / Opt Out / Not on list for a stored manufacturer value."""
+    """Opt In / Opt Out / Not on list for a stored manufacturer value. A deal
+    with no manufacturer is "Not on list" too — the column is never blank."""
     if not manufacturer:
-        return None
+        return "Not on list"
     if manufacturer in AB1755_OPT_IN:
         return "Opt In"
     if manufacturer in AB1755_OPT_OUT:
@@ -989,6 +996,20 @@ def main():
     print(f"Total deals: {len(deals)} ({time.monotonic() - t0:.0f}s)")
     if not deals:
         fail("HubSpot returned no deals — refusing to write an empty report.")
+
+    # California and Washington only — see ALLOWED_STATES.
+    kept, other = [], []
+    for d in deals:
+        state = d.get("properties", {}).get("legal_pipeline")
+        if state in ALLOWED_STATES:
+            kept.append(d)
+        else:
+            other.append(state or "(blank)")
+    dropped = pd.Series(other, dtype=object).value_counts()
+    if len(dropped):
+        print(f"Dropped {int(dropped.sum())} deals outside California / Washington: "
+              + ", ".join(f"{v}: {n}" for v, n in dropped.items()))
+    deals = kept
 
     # One row per deal, every one dated, none outside the pulled range. The windows already
     # guarantee it; checking the rows themselves means a filter that ever

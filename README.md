@@ -15,6 +15,10 @@ side and the four cycle times, all recomputed on every run. The script only does
 id → name, dropdown value → the label HubSpot shows — and converts dates to
 California time (`America/Los_Angeles`).
 
+**California and Washington only.** Deals in the Lemon Law pipeline whose
+Lemon Law - State is anything else ("Employment Law" — 12 in September 2026)
+are dropped, as in the Monthly Settlement Report; the log counts them.
+
 ## How it runs
 
 Same pattern as the Monthly Settlement Report: the workflow is
@@ -100,7 +104,8 @@ still comes out, just before Audit — and a test fails until it is placed.
   Referred Out (Referred Out - Complete) or Date - Closed Out then Date - Close Out After Retained
   (the rest), and the date the deal entered its current stage when that field
   is blank. Close Date Source names the field used, by its label.
-- **AB 1755 (Manufacturer)** — `Opt In`, `Opt Out` or `Not on list`, from the
+- **AB 1755 (Manufacturer)** — `Opt In`, `Opt Out` or `Not on list` (also for
+  deals with no manufacturer, so it is never blank), from the
   published AB 1755 list (`AB1755_OPT_IN` / `AB1755_OPT_OUT`, keyed on the
   stored manufacturer value). Genesis files under Hyundai, Infiniti under
   Nissan; Isuzu has no value in HubSpot. AB 1755 is California law — filter

@@ -104,7 +104,8 @@ def test_ab1755_maps_stored_manufacturer_values():
     assert main.ab1755_for("General Motors LLC") == "Opt In"
     assert main.ab1755_for("Toyota Motor Sales, U.S.A., Inc. / Lexus") == "Opt Out"
     assert main.ab1755_for("Winnebago Industries, Inc.") == "Not on list"
-    assert main.ab1755_for(None) is None
+    assert main.ab1755_for(None) == "Not on list"
+    assert main.ab1755_for("") == "Not on list"
     assert not (main.AB1755_OPT_IN & main.AB1755_OPT_OUT)
 
 
