@@ -74,7 +74,7 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 |---|---|
 | **Deal** | Record ID, Deal Name, Lemon Law - State, Create Date |
 | **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Is Closed, Is Settled, Date entered current stage, Close Date, Close Date Source |
-| **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
+| **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, Created by Inbound Call, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
 | **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
 | **Milestones** | Date - Intake, Intake Date Source, Date - Inquiry Qualified, Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
 | **Outcome** | Case Category, Date - Settled, Total Settled Attorneys Fees and Cost, Net Attorney Fees, Close Out Reason, Date - Closed Out, Date - Close Out After Retained, Legal Sub Phase |
@@ -111,6 +111,12 @@ still comes out, just before Audit — and a test fails until it is placed.
   Nissan; Isuzu has no value in HubSpot. AB 1755 is California law — filter
   Lemon Law - State to California for the split. Checked against RO Review
   (Final Decision) on 2026 deals: 2 of 485 disagree.
+- **Created by Inbound Call** — Yes / No: Yes when the deal was created by an
+  inbound call to an Aircall line (named "Aircall new contact, +1…" by the
+  deal-creation automation, or carrying an AirCall Entry Number; the name is
+  usually replaced after intake). Outbound cannot be read from the deal — it
+  needs the direction of the deal's first call on HubSpot's Calls object;
+  every run logs whether the token can read it ("Calls API: …").
 - **Manufacturer** is the full legal name, e.g. "General Motors LLC".
 - **People** columns are names; archived people resolve through the owner list.
 - **Stage history** — HubSpot has no "date entered" property for four stages:
