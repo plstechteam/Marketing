@@ -1,8 +1,8 @@
 """
 Marketing report — GitHub Actions version
-Pulls every Lemon Law deal created since 1 January of the current year from
-HubSpot and writes it, raw, to Marketing.xlsx in SharePoint via Microsoft
-Graph. The workbook is the source for a Power BI funnel report; every funnel
+Pulls every Lemon Law deal ever created (the firm's HubSpot history starts
+in April 2021) and writes it to the Deals tab of Marketing.xlsx in
+SharePoint via Microsoft Graph. The workbook is the source for a Power BI funnel report; every funnel
 calculation lives in Power BI, none of it here.
 """
 
@@ -35,6 +35,14 @@ FILE_PATH = (os.environ.get("SHAREPOINT_FILE_PATH") or
 DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 PIPELINE_ID = "default"          # Lemon Law. Employment Law is out of scope.
+
+# The whole history is pulled — marketing is compared year against year — so
+# the pull starts at the firm's first Lemon Law deal in HubSpot (18 April
+# 2021) and runs to now. Monthly windows from HISTORY_START; one extra window
+# below it, back to HISTORY_FLOOR, catches any deal imported with an older
+# create date, so "every deal" never depends on that first date staying true.
+HISTORY_START_YEAR = 2021
+HISTORY_FLOOR_YEAR = 2000
 
 PACIFIC = pytz.timezone("America/Los_Angeles")
 # Every date and time in the sheet is California time — deal dates, the
@@ -589,10 +597,35 @@ def fetch_owners(headers):
     return owners
 
 
+def window_label(start, end):
+    """A readable name for a window: the month when it is exactly one,
+    otherwise the span (the floor window, a split half, the current month)."""
+    if start.year < HISTORY_START_YEAR:
+        return f"before {end:%Y-%m-%d}"
+    tz = start.tzinfo
+    if start.day == 1 and start.hour == 0 and start.minute == 0:
+        nxt = tz.localize(datetime(start.year + start.month // 12, start.month % 12 + 1, 1))
+        if end == nxt:
+            return start.strftime("%Y-%m")
+    return f"{start:%Y-%m-%d %H:%M}..{end:%Y-%m-%d %H:%M}"
+
+
 def fetch_deals(properties, windows, headers):
+    """Every deal created in the windows, each window paged to the end.
+
+    A window whose HubSpot total reaches the search API's 10,000-result
+    ceiling is split in half and each half pulled on its own, as often as it
+    takes — busy months in 2023 run past 5,000 deals, and one twice that
+    would otherwise be silently truncated.
+
+    Properties HubSpot returns empty are dropped as they arrive: with the
+    full history (~230,000 deals) keeping every null would cost gigabytes.
+    """
     url = "https://api.hubapi.com/crm/v3/objects/deals/search"
     deals = {}
-    for start, end in windows:
+    pending = list(reversed(windows))
+    while pending:
+        start, end = pending.pop()
         payload = {
             "properties": properties,
             "limit": SEARCH_PAGE_SIZE,
@@ -606,6 +639,7 @@ def fetch_deals(properties, windows, headers):
         window_rows = 0
         total = None
         after = None
+        split = False
         while True:
             if after:
                 payload["after"] = after
@@ -614,20 +648,33 @@ def fetch_deals(properties, windows, headers):
                 fail(f"deal search: {r.status_code} — {r.text}")
             data = r.json()
             total = data.get("total", total)
+            if total is not None and total >= SEARCH_API_MAX_RESULTS and after is None:
+                if end - start < pd.Timedelta(minutes=1):
+                    fail(f"{window_label(start, end)}: {total} deals in under a minute — "
+                         "cannot split further; nothing written.")
+                middle = start + (end - start) / 2
+                print(f"  {window_label(start, end)}: {total} deals — splitting in two")
+                pending.append((middle, end))
+                pending.append((start, middle))
+                split = True
+                break
             for deal in data.get("results", []):
-                deals[deal["id"]] = deal
+                props = {k: v for k, v in deal.get("properties", {}).items() if v not in (None, "")}
+                deals[deal["id"]] = {"id": deal["id"], "properties": props}
                 window_rows += 1
             after = data.get("paging", {}).get("next", {}).get("after")
             if not after:
                 break
+        if split:
+            continue
 
-        label = start.strftime("%Y-%m")
-        print(f"  {label}: {window_rows} deals (HubSpot total {total})")
-        if window_rows >= SEARCH_API_MAX_RESULTS or (total or 0) >= SEARCH_API_MAX_RESULTS:
-            fail(f"{label} reached the {SEARCH_API_MAX_RESULTS:,}-result search ceiling — "
-                 "the pull would be truncated. Split the windows further.")
+        print(f"  {window_label(start, end)}: {window_rows} deals (HubSpot total {total})")
+        if window_rows >= SEARCH_API_MAX_RESULTS:
+            fail(f"{window_label(start, end)} reached the {SEARCH_API_MAX_RESULTS:,}-result "
+                 "search ceiling — the pull would be truncated; nothing written.")
         if total is not None and window_rows < total:
-            fail(f"{label}: downloaded {window_rows} of {total} — incomplete pull, nothing written.")
+            fail(f"{window_label(start, end)}: downloaded {window_rows} of {total} — "
+                 "incomplete pull, nothing written.")
     return list(deals.values())
 
 
@@ -865,13 +912,11 @@ def main():
     now_pacific = datetime.now(timezone.utc).astimezone(PACIFIC)
     print(f"Run started: {now_pacific.strftime('%Y-%m-%d %I:%M %p %Z')}")
 
-    # The window moves on its own: 1 January of the year the run happens in.
-    # It is cut on the same California clock the deal dates are written in,
-    # so the sheet's first Create Date is 1 January and every month in Power
-    # BI is complete.
+    # Every Lemon Law deal ever created, cut into California-time months.
     now_deal_tz = now_pacific.astimezone(DEAL_TZ)
-    year_start = DEAL_TZ.localize(datetime(now_deal_tz.year, 1, 1))
-    windows = month_windows(year_start, now_deal_tz)
+    history_floor = DEAL_TZ.localize(datetime(HISTORY_FLOOR_YEAR, 1, 1))
+    history_start = DEAL_TZ.localize(datetime(HISTORY_START_YEAR, 1, 1))
+    windows = [(history_floor, history_start)] + month_windows(history_start, now_deal_tz)
 
     hs_headers = {
         "Authorization": f"Bearer {env['HUBSPOT_TOKEN']}",
@@ -898,7 +943,7 @@ def main():
     owners = fetch_owners(hs_headers)
     print(f"Owners loaded: {len(owners)}")
 
-    print(f"Pulling deals created {year_start:%Y-%m-%d} to now, one month at a time:")
+    print("Pulling every Lemon Law deal ever created, one month at a time:")
     t0 = time.monotonic()
     deals = fetch_deals(properties, windows, hs_headers)
     print(f"Total deals: {len(deals)} ({time.monotonic() - t0:.0f}s)")
@@ -910,12 +955,14 @@ def main():
     # stops meaning what we think fails here instead of shipping.
     created = [parse_hubspot_datetime(d.get("properties", {}).get("createdate")) for d in deals]
     undated = sum(c is None for c in created)
-    outside = sum(c is not None and not (year_start.replace(tzinfo=None) <= c <= now_deal_tz.replace(tzinfo=None))
+    outside = sum(c is not None and not (history_floor.replace(tzinfo=None) <= c <= now_deal_tz.replace(tzinfo=None))
                   for c in created)
     if undated or outside:
         fail(f"{undated} deals without a create date and {outside} created outside "
-             f"{year_start:%Y-%m-%d} to now — nothing written.")
-    print(f"Every deal created {year_start:%Y-%m-%d} or later, all {len(deals)} dated")
+             f"{history_floor:%Y-%m-%d} to now — nothing written.")
+    by_year = pd.Series([c.year for c in created]).value_counts().sort_index()
+    print(f"All {len(deals)} deals dated; by year created: "
+          + ", ".join(f"{y}: {n}" for y, n in by_year.items()))
 
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,

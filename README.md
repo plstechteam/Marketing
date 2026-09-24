@@ -1,10 +1,12 @@
 # Marketing
 
-Pulls every **Lemon Law** deal created since **1 January of the current year**
-from HubSpot and writes it, raw, to `Marketing.xlsx` in SharePoint
+Pulls **every Lemon Law deal ever created** from HubSpot — the firm's history
+there starts on 18 April 2021, ~232,000 deals by September 2026 — and writes
+it to the **Deals** tab of `Marketing.xlsx` in SharePoint
 (`Data Inventory/PLS/Requests/`, next to the Monthly Settlement Report) via
 the Microsoft Graph API. The workbook is the source for the Power BI
-marketing funnel.
+marketing funnel, compared year against year, and for questions such as
+cases settled this year that were created in earlier years.
 
 **Almost nothing is calculated in the workbook.** The funnel buckets
 (Prospect, Lead, MQL, SQL, Closed Won, Closed Lost) and every rate live in
@@ -23,8 +25,13 @@ Each run rebuilds the whole file from HubSpot and overwrites it. There is no
 upsert: the pull is the complete year, so a deal merged, deleted or moved off
 the pipeline simply stops appearing.
 
-The window moves on its own: on 1 January the file starts over with the new
-year.
+The pull covers the whole history: monthly windows from January 2021 to
+now, plus one window before 2021 that catches any deal imported with an
+older create date. A month HubSpot reports at 10,000 deals or more (the
+search API's ceiling) is split in half until every piece fits.
+
+**Run it weekly.** A full-history run takes several minutes, almost all of
+it the HubSpot pull, so the external cron is set to once a week.
 
 ## Setup
 
@@ -50,8 +57,8 @@ The first real run creates the file; later runs overwrite it.
 
 ## The workbook
 
-**One sheet, `Deals`, one row per Lemon Law deal created this year — every
-one of them — and every row stands on its own** (no lookup tabs). Headers are
+**One tab, `Deals`, one row per Lemon Law deal ever created — every one of
+them — and every row stands on its own** (no lookup tabs). Headers are
 HubSpot's property labels, except the columns this script adds.
 
 ### Column layout
@@ -133,7 +140,8 @@ Form and Form ID.
 A dry run prints how many rows have a value in each column, the Close Date
 sources and the AB 1755 split (counts only).
 
-Size: ~18,000 rows and ~5 MB in September 2026, ~7 MB by year end.
+Size: ~232,000 rows and ~50–60 MB in September 2026, growing ~60,000 rows a
+year.
 
 ## Run time
 
@@ -193,7 +201,8 @@ What makes sure a run either lands complete or changes nothing:
 
 - Each month's pull must return exactly the count HubSpot reports, and none
   may reach the 10,000-result ceiling.
-- Every row must have a create date inside 1 January .. now.
+- Every row must have a create date, and none may fall outside the pulled
+  range.
 - After the upload, SharePoint's copy must have been modified by this upload
   and be about the size sent (not exact: SharePoint writes a few KB of its
   own metadata into Office files); otherwise the run fails.

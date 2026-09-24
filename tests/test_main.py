@@ -269,6 +269,55 @@ def test_settled_date_closes_a_deal_in_a_retained_stage():
     assert df["close_date_source"].tolist() == ["date___settled", None, None]
 
 
+def test_fetch_deals_splits_a_window_over_the_search_ceiling():
+    """A window whose total reaches 10,000 is halved until every half fits,
+    and every deal still comes back exactly once."""
+    start = P.localize(datetime(2023, 3, 1))
+    end = P.localize(datetime(2023, 4, 1))
+    # 12,000 fake deals spread evenly over March.
+    span = (end - start).total_seconds()
+    created = {str(i): start.timestamp() + span * i / 12000 for i in range(12000)}
+
+    class Resp:
+        status_code = 200
+        def __init__(self, body): self._b = body
+        def json(self): return self._b
+
+    calls = []
+    def fake(method, url, headers=None, json=None, **kw):
+        f = json["filterGroups"][0]["filters"]
+        lo, hi = int(f[1]["value"]) / 1000, int(f[2]["value"]) / 1000
+        ids = sorted(i for i, t in created.items() if lo <= t < hi)
+        offset = int(json.get("after") or 0)
+        page = ids[offset:offset + json["limit"]]
+        calls.append((lo, hi))
+        nxt = offset + len(page)
+        body = {"total": len(ids),
+                "results": [{"id": i, "properties": {"createdate": "x", "empty": None}} for i in page]}
+        if nxt < len(ids):
+            body["paging"] = {"next": {"after": str(nxt)}}
+        return Resp(body)
+
+    real = main.request_with_retry
+    main.request_with_retry = fake
+    try:
+        deals = main.fetch_deals(["createdate"], [(start, end)], {})
+    finally:
+        main.request_with_retry = real
+    assert len(deals) == 12000
+    assert len({d["id"] for d in deals}) == 12000
+    assert all("empty" not in d["properties"] for d in deals)    # nulls dropped
+    assert len({c for c in calls}) >= 3                            # split at least once
+
+
+def test_window_label():
+    assert main.window_label(P.localize(datetime(2000, 1, 1)), P.localize(datetime(2021, 1, 1))) \
+        == "before 2021-01-01"
+    assert main.window_label(P.localize(datetime(2023, 3, 1)), P.localize(datetime(2023, 4, 1))) == "2023-03"
+    assert main.window_label(P.localize(datetime(2023, 12, 1)), P.localize(datetime(2024, 1, 1))) == "2023-12"
+    assert ".." in main.window_label(P.localize(datetime(2023, 3, 1)), P.localize(datetime(2023, 3, 16)))
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]

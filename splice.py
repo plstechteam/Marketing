@@ -73,7 +73,17 @@ def _text(value):
 
 
 def sheet_xml(df, s_datetime, s_date):
-    """The worksheet part for df: a header row, then one row per record.
+    """The worksheet part for df, as one bytes object (tests, small sheets)."""
+    return b"".join(sheet_xml_chunks(df, s_datetime, s_date))
+
+
+def sheet_xml_chunks(df, s_datetime, s_date, rows_per_chunk=2000):
+    """The worksheet part for df, yielded in pieces: a header row, then one
+    row per record.
+
+    Streamed rather than built whole: the full history is ~230,000 rows and
+    the finished XML several hundred MB, which is written straight into the
+    zip a chunk at a time instead of held in memory.
 
     s_datetime / s_date are the cellXfs indexes that carry the two date
     formats in the target workbook's styles.xml.
@@ -96,8 +106,14 @@ def sheet_xml(df, s_datetime, s_date):
         out.append(f'<c r="{letters[c]}1" t="inlineStr"><is><t>{_text(name)}</t></is></c>')
     out.append("</row>")
 
+    yield "".join(out).encode("utf-8")
+    out = []
+
     values = df.astype(object).where(df.notna(), None)
     for r, row in enumerate(values.itertuples(index=False, name=None), start=2):
+        if (r - 2) % rows_per_chunk == 0 and out:
+            yield "".join(out).encode("utf-8")
+            out = []
         out.append(f'<row r="{r}">')
         for c, v in enumerate(row):
             if v is None:
@@ -123,7 +139,7 @@ def sheet_xml(df, s_datetime, s_date):
     out.append("</sheetData>"
                '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
                "</worksheet>")
-    return "".join(out).encode("utf-8")
+    yield "".join(out).encode("utf-8")
 
 
 def _attrs(tag):
@@ -228,9 +244,8 @@ def replace_sheet(xlsx_bytes, sheet_name, df):
         raise SpliceError(f"'{sheet_name}' has attached objects ({sheet_rels}); not editing it")
 
     styles, s_datetime, s_date = ensure_date_styles(styles)
-    new_sheet = sheet_xml(df, s_datetime, s_date)
-
-    changed = {part: new_sheet, "xl/styles.xml": styles.encode("utf-8")}
+    changed = {part: lambda: sheet_xml_chunks(df, s_datetime, s_date),
+               "xl/styles.xml": styles.encode("utf-8")}
     dropped = set()
 
     if "xl/calcChain.xml" in names:
@@ -260,7 +275,17 @@ def replace_sheet(xlsx_bytes, sheet_name, df):
             if info.filename in changed:
                 new_info = zipfile.ZipInfo(info.filename, date_time=info.date_time)
                 new_info.compress_type = zipfile.ZIP_DEFLATED
-                dst.writestr(new_info, changed[info.filename])
+                body = changed[info.filename]
+                if callable(body):
+                    # No force_zip64: some Excel versions misread Zip64
+                    # entries, and the sheet stays far below the 2 GB where
+                    # zipfile would need it (it raises there, and the run
+                    # fails without writing).
+                    with dst.open(new_info, "w") as f:
+                        for chunk in body():
+                            f.write(chunk)
+                else:
+                    dst.writestr(new_info, body)
             else:
                 dst.writestr(info, src.read(info.filename))
                 untouched.append(info.filename)
