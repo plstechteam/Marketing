@@ -150,8 +150,8 @@ def test_sheet_lookups_order_and_headers():
         "Manufacturer", main.AB1755_HEADER, "RO Review (Final Decision)",
         "Deal Owner", "Deal Owner ID",
         'Date entered "Intake (Lemon Law)"',  # raw stamp, Stage history
-        "Some New Property",                  # unplaced property: kept, before Audit
-        "Pipeline", "Last Refresh"]
+        "Pipeline", "Last Refresh",
+        "Some New Property"]                  # unplaced property: far right, shifts nothing
     row = sheet.iloc[0]
     assert row["Pipeline"] == "Lemon Law"
     assert row["Deal Stage"] == "Close Out" and row["Deal Stage ID"] == "5411635"
@@ -343,9 +343,57 @@ def test_inbound_call_from_aircall_name_or_entry_number():
     assert main.inbound_call_for(None, None) == "No"
 
 
+def test_first_call_columns():
+    import pandas as pd
+    deals = [{"id": "1"}, {"id": "2"}, {"id": "3"}, {"id": "4"}]
+    first = {"1": ("INBOUND", "2026-03-01T12:00:00Z"), "2": ("OUTBOUND", "2026-03-02T12:00:00Z"),
+             "3": (None, None)}
+    df = main.add_first_call(pd.DataFrame(index=range(4)), deals, first)
+    assert df["first_call_direction"].tolist() == ["Inbound", "Outbound", "Unknown", "No calls"]
+    assert df["first_call_date"].tolist()[0] == datetime(2026, 3, 1, 4, 0)
+    assert df["first_call_date"].tolist()[3] is None
+
+
+def test_new_columns_sit_at_the_far_right():
+    keys = [k for _, ks in main.COLUMN_GROUPS for k in ks]
+    assert keys[-5:] == ["created_by_inbound_call", "first_call_direction", "first_call_date",
+                         "intake_date_source", "date___inquiry_qualified"]
+    assert main.COLUMN_GROUPS[-1][0] == "Added later"
+
+
+def test_columns_the_maz_tab_reads_stay_put():
+    # Maz reads Deals by letter; these are the columns its formulas were built on.
+    keys = [k for _, ks in main.COLUMN_GROUPS for k in ks]
+    letters = {}
+    for i, k in enumerate(keys):
+        n, col = i + 1, ""
+        while n:
+            n, r = divmod(n - 1, 26)
+            col = chr(65 + r) + col
+        letters[col] = k
+    assert letters["A"] == "hs_object_id"
+    assert letters["C"] == "legal_pipeline"
+    assert letters["D"] == "createdate"
+    assert letters["E"] == "dealstage"
+    assert letters["X"] == "s__manufacturer"
+    assert letters["Y"] == "s__manufacturer__ab1755"
+    assert letters["AC"] == main.INTAKE_DATE
+    assert letters["AE"] == "date___retained"
+    assert letters["AF"] == main.READY_FOR_LEGAL
+    assert letters["AI"] == "date___settled"
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]
+
+
+def test_earliest_call_uses_timestamp_not_id_order():
+    calls = [("OUTBOUND", "2026-03-02T10:00:00Z"), ("INBOUND", "2026-03-01T09:00:00Z"),
+             ("OUTBOUND", None)]
+    assert main.earliest_call(calls) == ("INBOUND", "2026-03-01T09:00:00Z")
+    assert main.earliest_call([("INBOUND", None)]) == ("INBOUND", None)
+    assert main.earliest_call([]) == (None, None)
 
 
 if __name__ == "__main__":

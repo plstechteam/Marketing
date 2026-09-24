@@ -123,6 +123,19 @@ def test_refuses_when_deals_is_missing_or_has_attached_objects():
         raise AssertionError("a sheet with attached objects must refuse")
 
 
+def test_shift_guard_catches_a_column_inserted_in_the_middle_only():
+    before = fixture()           # Maz: formula on Deals!A:A, chart on Deals!$C$2:$C$4
+    refs = splice.referenced_columns(before, "Deals")
+    assert set(refs) == {"A", "C"}
+    inserted = pd.DataFrame({"Record ID": ["a"], "New": ["n"], "Deal Stage": ["x"], "Fee": [1]})
+    after, _ = splice.replace_sheet(before, "Deals", inserted)
+    assert [s[0] for s in splice.shifted_references(before, after, "Deals")] == ["C"]
+    appended = pd.DataFrame({"Record ID": ["a"], "Deal Stage": ["x"], "Fee": [1], "New": ["n"]})
+    after, _ = splice.replace_sheet(before, "Deals", appended)
+    assert splice.shifted_references(before, after, "Deals") == []
+    assert splice.header_row(after, "Deals") == {"A": "Record ID", "B": "Deal Stage", "C": "Fee", "D": "New"}
+
+
 def test_column_letters():
     assert [splice.column_letter(i) for i in (0, 25, 26, 51, 52, 701, 702)] == \
         ["A", "Z", "AA", "AZ", "BA", "ZZ", "AAA"]

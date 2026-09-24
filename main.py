@@ -9,8 +9,10 @@ calculation lives in Power BI, none of it here.
 import io
 import os
 import sys
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -33,6 +35,9 @@ FILE_PATH = (os.environ.get("SHAREPOINT_FILE_PATH") or
              "Data Inventory/PLS/Requests/Marketing.xlsx")
 
 DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+# One-off: let a run change a Deals column other tabs read (e.g. to move
+# columns back under formulas that were built for them). Never left on.
+ACCEPT_COLUMN_CHANGES = os.environ.get("ACCEPT_COLUMN_CHANGES", "").strip().lower() in ("1", "true", "yes")
 
 PIPELINE_ID = "default"          # Lemon Law. Employment Law is out of scope.
 
@@ -214,7 +219,27 @@ RETRY_STATUS   = {429, 500, 502, 503, 504}
 LOCKED_STATUS      = 423
 LOCKED_RETRY_DELAY = 60
 
+# HubSpot allows a private app ~100 requests per rolling 10 seconds (more on
+# higher tiers). Every HubSpot request, from any thread, waits for its slot so
+# the parallel call reads stay under it; a 429 still gets retried.
+HUBSPOT_HOST        = "api.hubapi.com"
+HUBSPOT_MAX_PER_SEC = 8
+RATE_LIMIT_ATTEMPTS = 8     # 429s clear once the 10-second window rolls
+RATE_LIMIT_DELAY    = 10
+
 session = requests.Session()
+session.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=16))
+_slot_lock = threading.Lock()
+_next_slot = [0.0]
+
+
+def _wait_for_hubspot_slot():
+    with _slot_lock:
+        now = time.monotonic()
+        start = max(now, _next_slot[0])
+        _next_slot[0] = start + 1.0 / HUBSPOT_MAX_PER_SEC
+    if start > now:
+        time.sleep(start - now)
 
 
 def _retry_delay(response, attempt):
@@ -235,7 +260,11 @@ def request_with_retry(method, url, *, timeout=HTTP_TIMEOUT, **kwargs):
     """Send a request, retrying rate limits, 5xx, 423 and network errors."""
     response = None
     reason = None
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    attempt = 0
+    while True:
+        attempt += 1
+        if HUBSPOT_HOST in url:
+            _wait_for_hubspot_slot()
         try:
             response = session.request(method, url, timeout=timeout, **kwargs)
         except requests.RequestException as exc:
@@ -247,14 +276,17 @@ def request_with_retry(method, url, *, timeout=HTTP_TIMEOUT, **kwargs):
                 return response
             reason = f"HTTP {response.status_code}"
 
-        if attempt == MAX_ATTEMPTS:
+        limit = RATE_LIMIT_ATTEMPTS if response is not None and response.status_code == 429 else MAX_ATTEMPTS
+        if attempt >= limit:
             break
         wait = _retry_delay(response, attempt)
-        print(f"  {method} failed ({reason}) — attempt {attempt}/{MAX_ATTEMPTS}, retrying in {wait:.0f}s")
+        if response is not None and response.status_code == 429:
+            wait = max(wait, RATE_LIMIT_DELAY)
+        print(f"  {method} failed ({reason}) — attempt {attempt}/{limit}, retrying in {wait:.0f}s")
         time.sleep(wait)
 
     if response is None:
-        print(f"ERROR: {method} {url.split('?')[0]} failed after {MAX_ATTEMPTS} attempts — {reason}")
+        print(f"ERROR: {method} {url.split('?')[0]} failed after {attempt} attempts — {reason}")
         sys.exit(1)
     return response
 
@@ -537,6 +569,8 @@ FIXED_HEADERS = {
     "last_refresh": "Last Refresh",
     INTAKE_DATE: "Date - Intake",
     "created_by_inbound_call": "Created by Inbound Call",
+    "first_call_direction": "First Call Direction",
+    "first_call_date": "First Call Date",
     "intake_date_source": "Intake Date Source",
     READY_FOR_LEGAL: "Date - Ready for Legal (Exited File Set Up)",
     **{key: header for key, header, _, _ in DURATIONS},
@@ -547,13 +581,18 @@ FIXED_HEADERS = {
 # is on, the milestones on the way, how it ended, who is on it, and the full
 # stage history. "STAGE_HISTORY" expands to one date column per pipeline
 # stage, in pipeline order.
+#
+# Columns A..AI are frozen: the Maz tab reads Deals by letter (AC Date -
+# Intake, AE Date - Retainer Signed, AF Ready for Legal, AI Date - Settled,
+# X Manufacturer, Y AB 1755, plus A, C, D, E). Anything new goes in "Added
+# later", at the far right.
 COLUMN_GROUPS = [
     ("Deal", ["hs_object_id", "dealname", "legal_pipeline", "createdate"]),
     ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed", "is_settled",
                        "hs_v2_date_entered_current_stage", "close_date", "close_date_source"]),
     ("Source / channel", ["lead___source", "lead___source__group_", "hs_analytics_source",
                           "hs_analytics_source_data_1", "hs_object_source_label",
-                          "created_by_inbound_call", "aircall_entry_number", "auto_dialer_call_type",
+                          "aircall_entry_number", "auto_dialer_call_type",
                           "tf__utm_source", "tf__utm_medium", "tf__utm_campaign", "gclid"]),
     ("Vehicle / AB 1755", ["s__manufacturer", "s__manufacturer__ab1755",
                            "ro_review__final_decision_", "vehicle___year",
@@ -562,7 +601,7 @@ COLUMN_GROUPS = [
     # to Legal. Date - Intake is the stage stamp back-filled with Inquiry
     # Qualified (see add_intake_date); both originals stay for audit — the
     # stamp in Stage history, Inquiry Qualified here.
-    ("Milestones", [INTAKE_DATE, "intake_date_source", INTAKE_LEGACY, "date___ro_review",
+    ("Milestones", [INTAKE_DATE, "date___ro_review",
                     "date___retained", READY_FOR_LEGAL, "date___referred_out"]),
     ("Outcome", ["case_category", "date___settled", "total_settled_attorneys_fees_and_cost",
                  "net_attorney_fees", "drop_reason", "date___dropped",
@@ -572,24 +611,29 @@ COLUMN_GROUPS = [
                 "senior_case_supervisor", "handling_attorney", "supervising_attorney"]),
     ("Stage history", ["STAGE_HISTORY"]),
     ("Audit", ["pipeline", "hs_lastmodifieddate", "last_refresh"]),
+    # Columns added after people started building on the workbook (formulas
+    # on Maz read Deals by column letter). New columns go HERE, at the far
+    # right, never in the groups above — inserting in the middle shifts every
+    # letter after it. The run also refuses to write if a column another tab
+    # reads would change header (see splice.shifted_references).
+    ("Added later", ["created_by_inbound_call", "first_call_direction", "first_call_date",
+                     "intake_date_source", INTAKE_LEGACY]),
 ]
 
 
 def column_order(columns, stage_columns):
     """Internal column keys in sheet order. A column no group names (a
-    property added to BASE_PROPERTIES but not placed) goes just before
-    Audit rather than being dropped."""
+    property added to BASE_PROPERTIES but not placed) goes at the far right,
+    after everything else, so it can never shift a column other tabs read."""
     ordered = []
     for group, keys in COLUMN_GROUPS:
-        if group == "Audit":
-            placed = set(ordered) | set(keys)
-            ordered += [c for c in columns if c not in placed]
         for key in keys:
             if key == "STAGE_HISTORY":
                 ordered += [c for c in stage_columns if c in columns]
             elif key in columns:
                 ordered.append(key)
-    return list(dict.fromkeys(ordered))
+    ordered = list(dict.fromkeys(ordered))
+    return ordered + [c for c in columns if c not in set(ordered)]
 
 
 def header_for(key, definitions):
@@ -669,6 +713,100 @@ def probe_calls_access(headers):
         except ValueError:
             pass
         print(f"Calls API: not readable ({r.status_code}) {detail[:200]}")
+
+
+CALL_READ_WORKERS = 6   # parallel calls batch reads, paced by HUBSPOT_MAX_PER_SEC
+
+
+def earliest_call(calls):
+    """(direction, timestamp) of the earliest call among (direction, timestamp)
+    pairs; calls without a timestamp only count when none has one."""
+    dated = [c for c in calls if c[1]]
+    if not dated:
+        return calls[0] if calls else (None, None)
+    return min(dated, key=lambda c: pd.Timestamp(c[1]))
+
+
+def fetch_first_calls(deal_ids, headers):
+    """{deal id: (direction, timestamp)} of each deal's earliest call.
+
+    Aircall logs every call on HubSpot's Calls object with hs_call_direction
+    (INBOUND / OUTBOUND). The deal→call associations are read in batches of
+    1,000 deals, then every associated call is read, 100 per request and
+    several requests at a time, and the call with the earliest hs_timestamp
+    wins. (Call ids do not follow call time — the lowest id was the earliest
+    call for only 2 of 3 deals — so every call has to be read.)
+    """
+    base = "https://api.hubapi.com"
+    deal_calls = {}
+    for i in range(0, len(deal_ids), 1000):
+        chunk = deal_ids[i:i + 1000]
+        r = request_with_retry("POST", f"{base}/crm/v4/associations/deals/calls/batch/read",
+                               headers=headers, json={"inputs": [{"id": d} for d in chunk]})
+        if r.status_code not in (200, 207):
+            fail(f"deal→call associations: {r.status_code} — {r.text[:300]}")
+        for item in r.json().get("results", []):
+            deal = str(item["from"]["id"])
+            ids = [int(t["toObjectId"]) for t in item.get("to", [])]
+            after = (item.get("paging") or {}).get("next", {}).get("after")
+            while after:   # a deal with more calls than one page
+                rr = request_with_retry(
+                    "GET", f"{base}/crm/v4/objects/deals/{deal}/associations/calls",
+                    headers=headers, params={"limit": 500, "after": after})
+                if rr.status_code != 200:
+                    fail(f"deal→call associations (next page): {rr.status_code} — {rr.text[:300]}")
+                body = rr.json()
+                ids += [int(t["toObjectId"]) for t in body.get("results", [])]
+                after = (body.get("paging") or {}).get("next", {}).get("after")
+            if ids:
+                deal_calls[deal] = ids
+
+    wanted = sorted({c for ids in deal_calls.values() for c in ids})
+    print(f"  {len(wanted)} calls linked to {len(deal_calls)} deals; reading them")
+
+    def read(batch):
+        r = request_with_retry("POST", f"{base}/crm/v3/objects/calls/batch/read", headers=headers,
+                               json={"inputs": [{"id": str(c)} for c in batch],
+                                     "properties": ["hs_call_direction", "hs_timestamp", "hs_createdate"]})
+        if r.status_code not in (200, 207):
+            raise RuntimeError(f"calls batch read: {r.status_code} — {r.text[:300]}")
+        out = {}
+        for c in r.json().get("results", []):
+            p = c.get("properties", {})
+            out[int(c["id"])] = (p.get("hs_call_direction"), p.get("hs_timestamp") or p.get("hs_createdate"))
+        return out
+
+    calls = {}
+    batches = [wanted[i:i + 100] for i in range(0, len(wanted), 100)]
+    with ThreadPoolExecutor(max_workers=CALL_READ_WORKERS) as pool:
+        try:
+            for n, part in enumerate(pool.map(read, batches), 1):
+                calls.update(part)
+                if n % 1000 == 0:
+                    print(f"  read {n} of {len(batches)} call batches")
+        except RuntimeError as exc:
+            fail(str(exc))
+    return {deal: earliest_call([calls[c] for c in ids if c in calls])
+            for deal, ids in deal_calls.items()}
+
+
+def add_first_call(df, deals, first_calls):
+    """First Call Direction (Inbound / Outbound / Unknown / No calls) and First
+    Call Date, one per row, in the order of `deals`."""
+    names = {"INBOUND": "Inbound", "OUTBOUND": "Outbound"}
+    directions, dates = [], []
+    for deal in deals:
+        hit = first_calls.get(str(deal["id"]))
+        if hit is None:
+            directions.append("No calls")
+            dates.append(None)
+        else:
+            direction, ts = hit
+            directions.append(names.get(direction, "Unknown"))
+            dates.append(parse_hubspot_datetime(ts))
+    df["first_call_direction"] = directions
+    df["first_call_date"] = pd.Series(dates, index=df.index, dtype=object)
+    return df
 
 
 def fetch_owners(headers):
@@ -994,6 +1132,26 @@ def build_workbook(df_deals):
     return buf.getvalue()
 
 
+def preview_other_tabs(xlsx_bytes, refs, max_row=12):
+    """Dry run only: the labels and formulas at the top of each tab that reads
+    Deals, so a log shows what those formulas were built to read. Prints
+    literal text and formulas only — never a formula's cached result, which
+    can be client data."""
+    import openpyxl
+    sheets = sorted({w.split("!")[0] for ws in refs.values() for w in ws if "!" in w})
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=False)
+    for name in sheets:
+        if name not in wb.sheetnames:
+            continue
+        print(f"DRY RUN: top of '{name}' (labels and formulas only):")
+        for row in wb[name].iter_rows(min_row=1, max_row=max_row):
+            for cell in row:
+                v = cell.value
+                if isinstance(v, str) and v.strip():
+                    print(f"    {name}!{cell.coordinate}: {v[:120]}")
+    wb.close()
+
+
 def main():
     env = {k: os.environ.get(k) for k in
            ("HUBSPOT_TOKEN", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET")}
@@ -1074,12 +1232,18 @@ def main():
     print(f"All {len(deals)} deals dated; by year created: "
           + ", ".join(f"{y}: {n}" for y, n in by_year.items()))
 
+    t0 = time.monotonic()
+    first_calls = fetch_first_calls([d["id"] for d in deals], hs_headers)
+    print(f"First calls: {len(first_calls)} of {len(deals)} deals have a call "
+          f"({time.monotonic() - t0:.0f}s)")
+
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
     df_deals = add_inbound_call(df_deals)
+    df_deals = add_first_call(df_deals, deals, first_calls)
     df_deals = add_intake_date(df_deals)
     df_deals = add_durations(df_deals)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
@@ -1104,6 +1268,27 @@ def main():
             fail(f"cannot update '{DEALS_SHEET}' safely: {exc} — nothing written")
         if not splice.untouched_parts_identical(existing, workbook, report):
             fail("a part other than Deals would change — nothing written")
+        # Formulas in other tabs read Deals by column letter; make sure every
+        # column they read keeps its header.
+        refs = splice.referenced_columns(existing, DEALS_SHEET)
+        old_headers = splice.header_row(existing, DEALS_SHEET)
+        if refs:
+            print(f"Other tabs read {len(refs)} Deals column(s): " + "; ".join(
+                f"{col} ({old_headers.get(col, '?')}) <- {len(w)} formula(s), e.g. {', '.join(w[:3])}"
+                for col, w in sorted(refs.items(), key=lambda kv: splice.column_index(kv[0]))))
+        if DRY_RUN and refs:
+            preview_other_tabs(existing, refs)
+        shifts = splice.shifted_references(existing, workbook, DEALS_SHEET)
+        if shifts:
+            for col, where, before, after in shifts:
+                print(f"  COLUMN SHIFT {col}: '{before}' -> '{after}' — read by {', '.join(where[:5])}")
+            if ACCEPT_COLUMN_CHANGES:
+                print("ACCEPT_COLUMN_CHANGES is set: writing the new layout on purpose.")
+            elif DRY_RUN:
+                print("DRY RUN: a real run would stop here to protect those formulas.")
+            else:
+                fail("a column other tabs read would change — nothing written. Put new columns "
+                     "at the far right (the 'Added later' group) instead.")
         print(f"Sheets in the workbook: {', '.join(report['sheets'])}")
         print(f"Replacing only '{DEALS_SHEET}' ({report['sheet_part']}); "
               f"{len(report['untouched'])} other parts copied unchanged")
@@ -1132,6 +1317,9 @@ def main():
             col = df_deals[header].dropna()
             median = f"{col.median():.0f}" if len(col) else "-"
             print(f"    {header}: {len(col)} rows, median {median}, negative {int((col < 0).sum())}")
+        print("DRY RUN: First Call Direction:")
+        for v, n in df_deals["First Call Direction"].value_counts().items():
+            print(f"    {n:>6}  {v}")
         print("DRY RUN: Created by Inbound Call:")
         for v, n in df_deals["Created by Inbound Call"].value_counts().items():
             print(f"    {n:>6}  {v}")
