@@ -217,6 +217,11 @@ SEARCH_API_MAX_RESULTS = 10_000
 # ======================================================
 HTTP_TIMEOUT   = (10, 120)
 UPLOAD_TIMEOUT = (10, 300)
+# Downloads: a healthy 80 MB read keeps bytes flowing (it takes seconds), so
+# a read that stalls for a minute is retried rather than waited out. Right
+# after an upload SharePoint can hold a download open while it processes the
+# new file; the 300s upload timeout once cost a run five idle minutes there.
+DOWNLOAD_TIMEOUT = (10, 60)
 MAX_ATTEMPTS   = 4
 RETRY_STATUS   = {429, 500, 502, 503, 504}
 # 423: someone has the workbook open in Excel. Clears on a human timescale.
@@ -1112,7 +1117,7 @@ def fetch_existing(token):
         fail(f"SharePoint file check: {r.status_code} — {r.text}")
     etag = r.json().get("eTag")
     r = request_with_retry("GET", base + FILE_PATH + ":/content", headers=headers,
-                           timeout=UPLOAD_TIMEOUT)
+                           timeout=DOWNLOAD_TIMEOUT)
     if r.status_code != 200:
         fail(f"SharePoint download: {r.status_code} — {r.text}")
     return r.content, etag
@@ -1127,7 +1132,7 @@ def fetch_calls_cache(token):
     """(seen, first) from SharePoint, or None when missing or unreadable."""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{calls_cache_path()}:/content"
     r = request_with_retry("GET", url, headers={"Authorization": f"Bearer {token}"},
-                           timeout=UPLOAD_TIMEOUT)
+                           timeout=DOWNLOAD_TIMEOUT)
     if r.status_code == 404:
         print("Calls cache: none yet — every call will be read (about 30 minutes, once)")
         return None
@@ -1561,6 +1566,7 @@ def main():
     # This cannot undo an upload, but it turns a silent loss into a failed
     # run — and SharePoint's version history can restore the previous file.
     if report is not None:
+        time.sleep(5)   # let SharePoint finish taking the upload in
         stored, _ = fetch_existing(token)
         if other_sheet_parts(stored, report) != other_sheet_parts(existing, report):
             fail("the other tabs in SharePoint's copy differ from before the upload — "
