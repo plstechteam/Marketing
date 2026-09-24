@@ -79,6 +79,7 @@ BASE_PROPERTIES = [
     "date___dropped",               # Date - Closed Out
     "date__intake_sign_up_close_out",   # Date - Close Out After Retained
     "date___referred_out",          # Date - Referred Out
+    "date___inquiry_qualified",     # Date - Inquiry Qualified: intake, before 2026
     "date___ro_review",             # Date - RO Review
     "date___retained",              # Date - Retainer Signed
     "hs_v2_date_exited_5792630",    # left New File Set Up = ready for Legal
@@ -408,16 +409,26 @@ def build_deals_frame(deals, properties, definitions, stage_labels, owners, pipe
 INTAKE_ENTERED = "hs_v2_date_entered_5411633"
 READY_FOR_LEGAL = "hs_v2_date_exited_5792630"
 
+# The Intake date the sheet reports. HubSpot's own stamp for entering the
+# Intake stage is the one to use, but it only covers deals that passed
+# through the stage since it was set up that way; before 2026 the firm
+# recorded intake in "Date - Inquiry Qualified" instead, and that property
+# was never back-filled into the stage stamp (40,567 deals created before
+# 2026 carry it; none created in 2026 do). So the stage stamp always wins,
+# and Inquiry Qualified only fills the rows where it is blank.
+INTAKE_LEGACY = "date___inquiry_qualified"
+INTAKE_DATE = "intake_date"
+
 # Cycle times, in calendar days, computed on every run from that run's
 # dates — so a date corrected in HubSpot corrects its duration on the next
 # run. (key, header, from date, to date).
 DURATIONS = [
     ("days_created_to_intake", "Days: Created to Intake",
-     "createdate", INTAKE_ENTERED),
+     "createdate", INTAKE_DATE),
     ("days_created_to_ro_review", "Days: Created to RO Review",
      "createdate", "date___ro_review"),
     ("days_intake_to_signed", "Days: Intake to Retainer Signed",
-     INTAKE_ENTERED, "date___retained"),
+     INTAKE_DATE, "date___retained"),
     ("days_ro_review_to_signed", "Days: RO Review to Retainer Signed",
      "date___ro_review", "date___retained"),
     ("days_signed_to_ready_for_legal", "Days: Retainer Signed to Ready for Legal",
@@ -425,7 +436,7 @@ DURATIONS = [
     ("days_ro_review_to_ready_for_legal", "Days: RO Review to Ready for Legal",
      "date___ro_review", READY_FOR_LEGAL),
     ("days_intake_to_ready_for_legal", "Days: Intake to Ready for Legal",
-     INTAKE_ENTERED, READY_FOR_LEGAL),
+     INTAKE_DATE, READY_FOR_LEGAL),
     ("days_created_to_ready_for_legal", "Days: Created to Ready for Legal",
      "createdate", READY_FOR_LEGAL),
     ("days_created_to_settled", "Days: Created to Settled",
@@ -443,6 +454,29 @@ def days_between(start, end):
     return (to_date(end) - to_date(start)).days
 
 
+def add_intake_date(df):
+    """Date - Intake: the Intake stage stamp, or Inquiry Qualified where the
+    stamp is blank — never the other way round — plus where it came from."""
+    new = df[INTAKE_ENTERED] if INTAKE_ENTERED in df.columns else pd.Series(None, index=df.index)
+    old = df[INTAKE_LEGACY] if INTAKE_LEGACY in df.columns else pd.Series(None, index=df.index)
+    # Value by value, so each keeps its own type — a stamp stays a datetime,
+    # an Inquiry Qualified stays a date — instead of pandas coercing the lot.
+    dates, sources = [], []
+    for stamp, legacy in zip(new.tolist(), old.tolist()):
+        if stamp is not None and not pd.isna(stamp):
+            dates.append(stamp.to_pydatetime() if isinstance(stamp, pd.Timestamp) else stamp)
+            sources.append(INTAKE_ENTERED)
+        elif legacy is not None and not pd.isna(legacy):
+            dates.append(legacy)
+            sources.append(INTAKE_LEGACY)
+        else:
+            dates.append(None)
+            sources.append(None)
+    df[INTAKE_DATE] = pd.Series(dates, index=df.index, dtype=object)
+    df["intake_date_source"] = pd.Series(sources, index=df.index, dtype=object)
+    return df
+
+
 def add_durations(df):
     for key, _, start, end in DURATIONS:
         if start in df.columns and end in df.columns:
@@ -457,6 +491,8 @@ def add_durations(df):
 # headed by its HubSpot label.
 FIXED_HEADERS = {
     "hs_object_id": "Record ID",
+    # Fixed rather than HubSpot's label: the dry-run summary groups by it.
+    "dealstage": "Deal Stage",
     "dealstage__id": "Deal Stage ID",
     "dealstage__order": "Deal Stage Order",
     "dealstage__closed": "Is Closed",
@@ -467,6 +503,8 @@ FIXED_HEADERS = {
     "hubspot_owner_id": "Deal Owner",
     "hubspot_owner_id__id": "Deal Owner ID",
     "last_refresh": "Last Refresh",
+    INTAKE_DATE: "Date - Intake",
+    "intake_date_source": "Intake Date Source",
     READY_FOR_LEGAL: "Date - Ready for Legal (Exited File Set Up)",
     **{key: header for key, header, _, _ in DURATIONS},
 }
@@ -488,9 +526,11 @@ COLUMN_GROUPS = [
                            "ro_review__final_decision_", "vehicle___year",
                            "c__vehicle___model__new_test_"]),
     # In the order a case moves: intake, RO review, retainer signed, handed
-    # to Legal. Intake's date lives here rather than in Stage history.
-    ("Milestones", [INTAKE_ENTERED, "date___ro_review", "date___retained",
-                    READY_FOR_LEGAL, "date___referred_out"]),
+    # to Legal. Date - Intake is the stage stamp back-filled with Inquiry
+    # Qualified (see add_intake_date); both originals stay for audit — the
+    # stamp in Stage history, Inquiry Qualified here.
+    ("Milestones", [INTAKE_DATE, "intake_date_source", INTAKE_LEGACY, "date___ro_review",
+                    "date___retained", READY_FOR_LEGAL, "date___referred_out"]),
     ("Outcome", ["case_category", "date___settled", "total_settled_attorneys_fees_and_cost",
                  "net_attorney_fees", "drop_reason", "date___dropped",
                  "date__intake_sign_up_close_out", "deal_stage___sub_phase"]),
@@ -528,9 +568,9 @@ def to_sheet(df, definitions, stage_columns):
     Date Source is written as the label of the field used, so the row says
     "Date - Settled" rather than an internal name."""
     df = df[column_order(list(df.columns), stage_columns)].copy()
-    if "close_date_source" in df.columns:
-        df["close_date_source"] = df["close_date_source"].map(
-            lambda k: header_for(k, definitions) if k else None)
+    for source in ("close_date_source", "intake_date_source"):
+        if source in df.columns:
+            df[source] = df[source].map(lambda k: header_for(k, definitions) if k else None)
     df.columns = unique_headers([(header_for(c, definitions), c) for c in df.columns])
     return df
 
@@ -969,6 +1009,7 @@ def main():
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
+    df_deals = add_intake_date(df_deals)
     df_deals = add_durations(df_deals)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
     df_deals["last_refresh"] = refreshed
@@ -1020,6 +1061,9 @@ def main():
             col = df_deals[header].dropna()
             median = f"{col.median():.0f}" if len(col) else "-"
             print(f"    {header}: {len(col)} rows, median {median}, negative {int((col < 0).sum())}")
+        print("DRY RUN: Date - Intake by source:")
+        for v, n in df_deals["Intake Date Source"].value_counts(dropna=False).items():
+            print(f"    {n:>6}  {v}")
         print("DRY RUN: AB 1755 by manufacturer:")
         for v, n in df_deals[AB1755_HEADER].value_counts(dropna=False).items():
             print(f"    {n:>6}  {v}")
