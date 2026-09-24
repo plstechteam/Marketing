@@ -396,6 +396,70 @@ def test_earliest_call_uses_timestamp_not_id_order():
     assert main.earliest_call([]) == (None, None)
 
 
+def test_calls_cache_round_trip():
+    seen = {5, 1_000_000, 42, 7}
+    first = {"101": (42, "INBOUND", "2026-03-01T09:00:00Z"), "102": (7, None, "2024-01-01T00:00:00Z")}
+    assert main.decode_calls_cache(main.encode_calls_cache(seen, first)) == (seen, first)
+    assert main.decode_calls_cache(b"not gzip") is None
+
+
+def test_cache_reads_only_new_calls_and_keeps_the_earliest():
+    first = {"A": (10, "OUTBOUND", "2026-03-02T10:00:00Z"),   # still linked
+             "B": (20, "INBOUND", "2026-01-01T00:00:00Z")}    # its first call was unlinked
+    seen = {10, 11, 20, 21}
+    deal_calls = {"A": [10, 11, 12], "B": [21, 22], "C": [30]}
+    plan = main.plan_call_reads(deal_calls, seen, first)
+    assert plan == {"A": [12], "B": [21, 22], "C": [30]}
+    read = {12: ("INBOUND", "2026-03-01T08:00:00Z"),          # earlier than A's cached first
+            21: ("OUTBOUND", "2026-02-01T00:00:00Z"), 22: ("INBOUND", "2026-02-05T00:00:00Z"),
+            30: (None, "2026-04-01T00:00:00Z")}
+    merged, new_seen = main.merge_first_calls(deal_calls, seen, first, plan, read)
+    assert merged["A"] == (12, "INBOUND", "2026-03-01T08:00:00Z")
+    assert merged["B"] == (21, "OUTBOUND", "2026-02-01T00:00:00Z")
+    assert merged["C"] == (30, None, "2026-04-01T00:00:00Z")
+    assert new_seen == {10, 11, 12, 21, 22, 30}   # 20 is no longer linked
+    # Next run with nothing new reads nothing and keeps the answers.
+    assert main.plan_call_reads(deal_calls, new_seen, merged) == {}
+
+
+def test_fetch_first_calls_with_a_cache_reads_only_new_calls():
+    class R:
+        def __init__(self, body):
+            self.status_code, self._body, self.text = 200, body, ""
+
+        def json(self):
+            return self._body
+
+    links = {"1": [100, 101], "2": [200]}
+    calls = {100: ("OUTBOUND", "2026-01-02T00:00:00Z"), 101: ("INBOUND", "2026-01-01T00:00:00Z"),
+             200: ("INBOUND", "2026-02-01T00:00:00Z")}
+    asked = []
+
+    def fake(method, url, **kw):
+        ids = [i["id"] for i in kw["json"]["inputs"]]
+        if "associations" in url:
+            return R({"results": [{"from": {"id": d}, "to": [{"toObjectId": c} for c in links[d]]}
+                                  for d in ids if d in links]})
+        asked.extend(int(i) for i in ids)
+        return R({"results": [{"id": i, "properties": {"hs_call_direction": calls[int(i)][0],
+                                                       "hs_timestamp": calls[int(i)][1]}} for i in ids]})
+
+    real = main.request_with_retry
+    main.request_with_retry = fake
+    try:
+        first, cache = main.fetch_first_calls(["1", "2", "3"], {}, None)
+        assert first == {"1": ("INBOUND", "2026-01-01T00:00:00Z"), "2": ("INBOUND", "2026-02-01T00:00:00Z")}
+        assert sorted(asked) == [100, 101, 200]
+        asked.clear()
+        links["2"].append(201)
+        calls[201] = ("OUTBOUND", "2026-01-15T00:00:00Z")
+        first, _ = main.fetch_first_calls(["1", "2", "3"], {}, cache)
+        assert asked == [201]
+        assert first["2"] == ("OUTBOUND", "2026-01-15T00:00:00Z")
+    finally:
+        main.request_with_retry = real
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

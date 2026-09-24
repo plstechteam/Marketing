@@ -12,6 +12,10 @@ on:
         description: "Run the full pipeline but skip the SharePoint upload"
         type: boolean
         default: false
+      rebuild_calls_cache:
+        description: "Ignore the calls cache and read every call again (about 30 extra minutes)"
+        type: boolean
+        default: false
       accept_column_changes:
         description: "One-off: allow a change to Deals columns that other tabs (Maz) read"
         type: boolean
@@ -57,6 +61,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: '1'
           DRY_RUN: ${{ inputs.dry_run }}
+          REBUILD_CALLS_CACHE: ${{ inputs.rebuild_calls_cache }}
           ACCEPT_COLUMN_CHANGES: ${{ inputs.accept_column_changes }}
           # Empty means "use the default", which is the live file; main.py
           # reads this with `or` so an empty string does not win.

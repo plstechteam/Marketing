@@ -428,8 +428,10 @@ def header_row(xlsx_bytes, sheet_name):
 def shifted_references(before, after, sheet_name):
     """[(column, tabs/cells, header before, header after)] for every column
     another tab reads whose header would change between the two files."""
-    refs = referenced_columns(before, sheet_name)
     old, new = header_row(before, sheet_name), header_row(after, sheet_name)
+    if old == new:   # no header moved, so no reference can have shifted —
+        return []    # skip scanning every formula in the other tabs
+    refs = referenced_columns(before, sheet_name)
     return [(col, where, old.get(col), new.get(col))
             for col, where in sorted(refs.items(), key=lambda kv: column_index(kv[0]))
             if old.get(col) != new.get(col)]
