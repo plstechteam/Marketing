@@ -491,6 +491,8 @@ def add_durations(df):
 # headed by its HubSpot label.
 FIXED_HEADERS = {
     "hs_object_id": "Record ID",
+    # Fixed rather than HubSpot's label: the dry-run summary groups by it.
+    "dealstage": "Deal Stage",
     "dealstage__id": "Deal Stage ID",
     "dealstage__order": "Deal Stage Order",
     "dealstage__closed": "Is Closed",
