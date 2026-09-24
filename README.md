@@ -72,7 +72,7 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 | **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Is Closed, Is Settled, Date entered current stage, Close Date, Close Date Source |
 | **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
 | **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
-| **Milestones** | Date entered "Intake", Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
+| **Milestones** | Date - Intake, Intake Date Source, Date - Inquiry Qualified, Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
 | **Outcome** | Case Category, Date - Settled, Total Settled Attorneys Fees and Cost, Net Attorney Fees, Close Out Reason, Date - Closed Out, Date - Close Out After Retained, Legal Sub Phase |
 | **Cycle time (days)** | Created to Intake, Created to RO Review, Intake to Retainer Signed, RO Review to Retainer Signed, Retainer Signed to Ready for Legal, RO Review to Ready for Legal, Intake to Ready for Legal, Created to Ready for Legal, Created to Settled |
 | **People** | Deal Owner, Deal Owner ID, Intake - Case Supervisor, Senior Case Supervisor, Legal - Handling Attorney, Settlement Attorney |
@@ -114,13 +114,21 @@ still comes out, just before Audit — and a test fails until it is placed.
 - There is no "New File Set Up - Intake" stage in this pipeline; the file
   set-up stage is "New File Set Up - Doc Collection".
 - **Milestones**, in the order a case moves:
-  1. **Intake** — Date entered "Intake" (the stage's own HubSpot stamp)
+  1. **Intake** — **Date - Intake**: HubSpot's stamp for entering the Intake
+     stage, and — only where that stamp is blank — **Date - Inquiry
+     Qualified**, where the firm recorded intake before 2026 (that property
+     was never back-filled into the stamp: 40,567 deals created before 2026
+     carry it, none created in 2026). The stamp always wins. **Intake Date
+     Source** says which one each row used; both originals stay in the sheet
+     (the stamp in Stage history, Inquiry Qualified next to Date - Intake).
+     Checked on samples: Inquiry Qualified is on or before Sign Up for 99% of
+     2021 and 100% of 2023 signed cases, 85% of 2025's
   2. **RO Review** — Date - RO Review
   3. **Retainer Signed** — Date - Retainer Signed (`date___retained`)
   4. **Ready for Legal** — the day the deal left New File Set Up - Doc
      Collection (`hs_v2_date_exited_5792630`)
 - **Cycle time (days)** — whole calendar days between two of the row's own
-  dates (`DURATIONS` in `main.py`): Created to Intake, Created to RO Review,
+  dates (`DURATIONS` in `main.py`; the Intake ones use Date - Intake): Created to Intake, Created to RO Review,
   Intake to Retainer Signed, RO Review to Retainer Signed, Retainer Signed to
   Ready for Legal, RO Review to Ready for Legal, Intake to Ready for Legal,
   Created to Ready for Legal, Created to Settled.

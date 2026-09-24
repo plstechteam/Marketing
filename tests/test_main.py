@@ -147,8 +147,8 @@ def test_sheet_lookups_order_and_headers():
         "Close Date", "Close Date Source",
         "Lead - Source",
         "Manufacturer", main.AB1755_HEADER, "RO Review (Final Decision)",
-        'Date entered "Intake (Lemon Law)"',  # a milestone now, not stage history
         "Deal Owner", "Deal Owner ID",
+        'Date entered "Intake (Lemon Law)"',  # raw stamp, Stage history
         "Some New Property",                  # unplaced property: kept, before Audit
         "Pipeline", "Last Refresh"]
     row = sheet.iloc[0]
@@ -179,7 +179,7 @@ def test_durations_are_calendar_days_and_blank_when_a_date_is_missing():
     assert main.days_between(None, date(2026, 1, 3)) is None
     df = pd.DataFrame({
         "createdate": [datetime(2026, 1, 1, 9), datetime(2026, 2, 1, 9)],
-        main.INTAKE_ENTERED: [datetime(2026, 1, 2, 9), None],
+        main.INTAKE_DATE: [datetime(2026, 1, 2, 9), None],
         "date___ro_review": [date(2026, 1, 11), None],
         "date___retained": [date(2026, 1, 15), None],
         main.READY_FOR_LEGAL: [datetime(2026, 1, 21, 15), None],
@@ -201,14 +201,30 @@ def test_durations_are_calendar_days_and_blank_when_a_date_is_missing():
     assert out["days_intake_to_signed"].isna().tolist() == [False, True]
 
 
-def test_milestones_in_case_order_and_intake_not_repeated_in_stage_history():
-    cols = ["createdate", main.INTAKE_ENTERED, "date___ro_review", "date___retained",
-            main.READY_FOR_LEGAL, "hs_v2_date_entered_5411640"]
+def test_milestones_in_case_order():
+    cols = ["createdate", main.INTAKE_DATE, "intake_date_source", main.INTAKE_LEGACY,
+            "date___ro_review", "date___retained", main.READY_FOR_LEGAL,
+            main.INTAKE_ENTERED, "hs_v2_date_entered_5411640"]
     order = main.column_order(cols, [main.INTAKE_ENTERED, "hs_v2_date_entered_5411640"])
-    assert order.count(main.INTAKE_ENTERED) == 1
-    assert order.index(main.INTAKE_ENTERED) < order.index("date___ro_review") \
+    assert order.index(main.INTAKE_DATE) < order.index("date___ro_review") \
         < order.index("date___retained") < order.index(main.READY_FOR_LEGAL) \
-        < order.index("hs_v2_date_entered_5411640")
+        < order.index(main.INTAKE_ENTERED)          # the raw stamp is back in Stage history
+
+
+def test_intake_date_prefers_the_stage_stamp_and_backfills_blanks():
+    import pandas as pd
+    df = pd.DataFrame({
+        main.INTAKE_ENTERED: [datetime(2026, 2, 1, 9), None, datetime(2024, 5, 1, 8), None],
+        main.INTAKE_LEGACY: [date(2026, 1, 20), date(2023, 3, 4), date(2024, 4, 1), None],
+    })
+    out = main.add_intake_date(df)
+    assert out[main.INTAKE_DATE].tolist() == [
+        datetime(2026, 2, 1, 9),        # stamp present: stamp, even with a legacy date
+        date(2023, 3, 4),               # stamp blank: back-filled
+        datetime(2024, 5, 1, 8),        # stamp wins over an earlier legacy date
+        None]                           # neither: blank
+    assert out["intake_date_source"].tolist() == [
+        main.INTAKE_ENTERED, main.INTAKE_LEGACY, main.INTAKE_ENTERED, None]
 
 def test_headers_are_english_ascii():
     for header in main.FIXED_HEADERS.values():
