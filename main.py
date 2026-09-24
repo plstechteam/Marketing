@@ -36,6 +36,12 @@ DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 PIPELINE_ID = "default"          # Lemon Law. Employment Law is out of scope.
 
+# Lemon Law - State values kept. A handful of deals in the Lemon Law pipeline
+# are marked "Employment Law" (12 in September 2026); they are not Lemon Law
+# cases and are dropped, as the Monthly Settlement Report drops them. Stored
+# values, not labels.
+ALLOWED_STATES = {"LEMON LAW (CA)", "LEMON LAW (WA)"}
+
 # The whole history is pulled — marketing is compared year against year — so
 # the pull starts at the firm's first Lemon Law deal in HubSpot (18 April
 # 2021) and runs to now. Monthly windows from HISTORY_START; one extra window
@@ -179,9 +185,10 @@ AB1755_HEADER = "AB 1755 (Manufacturer)"
 
 
 def ab1755_for(manufacturer):
-    """Opt In / Opt Out / Not on list for a stored manufacturer value."""
+    """Opt In / Opt Out / Not on list for a stored manufacturer value. A deal
+    with no manufacturer is "Not on list" too — the column is never blank."""
     if not manufacturer:
-        return None
+        return "Not on list"
     if manufacturer in AB1755_OPT_IN:
         return "Opt In"
     if manufacturer in AB1755_OPT_OUT:
@@ -454,6 +461,31 @@ def days_between(start, end):
     return (to_date(end) - to_date(start)).days
 
 
+def inbound_call_for(dealname, aircall_entry_number):
+    """Yes when the deal was created by an inbound call to an Aircall line.
+
+    An inbound Aircall call creates the deal through the "[2026] Deal
+    Creation" automation under the name "Aircall new contact, +1…", and
+    AirCall Entry Number holds the firm's line the call came in on. The name
+    is usually replaced once intake knows the client, so either signal is
+    enough. Outbound cannot be read from the deal; see probe_calls_access.
+    """
+    name = str(dealname or "").strip().lower()
+    if name.startswith("aircall new contact") or aircall_entry_number:
+        return "Yes"
+    return "No"
+
+
+def add_inbound_call(df):
+    names = df["dealname"] if "dealname" in df.columns else pd.Series(None, index=df.index)
+    lines = df["aircall_entry_number"] if "aircall_entry_number" in df.columns \
+        else pd.Series(None, index=df.index)
+    df["created_by_inbound_call"] = [
+        inbound_call_for(n, l if l is not None and not pd.isna(l) else None)
+        for n, l in zip(names.tolist(), lines.tolist())]
+    return df
+
+
 def add_intake_date(df):
     """Date - Intake: the Intake stage stamp, or Inquiry Qualified where the
     stamp is blank — never the other way round — plus where it came from."""
@@ -504,6 +536,7 @@ FIXED_HEADERS = {
     "hubspot_owner_id__id": "Deal Owner ID",
     "last_refresh": "Last Refresh",
     INTAKE_DATE: "Date - Intake",
+    "created_by_inbound_call": "Created by Inbound Call",
     "intake_date_source": "Intake Date Source",
     READY_FOR_LEGAL: "Date - Ready for Legal (Exited File Set Up)",
     **{key: header for key, header, _, _ in DURATIONS},
@@ -520,7 +553,7 @@ COLUMN_GROUPS = [
                        "hs_v2_date_entered_current_stage", "close_date", "close_date_source"]),
     ("Source / channel", ["lead___source", "lead___source__group_", "hs_analytics_source",
                           "hs_analytics_source_data_1", "hs_object_source_label",
-                          "aircall_entry_number", "auto_dialer_call_type",
+                          "created_by_inbound_call", "aircall_entry_number", "auto_dialer_call_type",
                           "tf__utm_source", "tf__utm_medium", "tf__utm_campaign", "gclid"]),
     ("Vehicle / AB 1755", ["s__manufacturer", "s__manufacturer__ab1755",
                            "ro_review__final_decision_", "vehicle___year",
@@ -614,6 +647,28 @@ def fetch_property_definitions(names, headers):
         # as an empty column and a warning, not kill the report.
         print(f"WARNING: properties not found in HubSpot: {', '.join(missing)}")
     return definitions
+
+
+def probe_calls_access(headers):
+    """Can this token read HubSpot calls? Reported only, never fatal.
+
+    Telling an inbound deal from an outbound one needs the direction of the
+    first call on the deal, which lives on the Calls object. Whether the
+    private app's token may read it depends on its scopes, so every run
+    says so in the log.
+    """
+    r = request_with_retry("GET", "https://api.hubapi.com/crm/v3/objects/calls",
+                           headers=headers, params={"limit": 1, "properties": "hs_call_direction"})
+    if r.status_code == 200:
+        sample = (r.json().get("results") or [{}])[0].get("properties", {})
+        print(f"Calls API: readable (sample hs_call_direction: {sample.get('hs_call_direction')!r})")
+    else:
+        detail = ""
+        try:
+            detail = r.json().get("message", "")
+        except ValueError:
+            pass
+        print(f"Calls API: not readable ({r.status_code}) {detail[:200]}")
 
 
 def fetch_owners(headers):
@@ -980,6 +1035,7 @@ def main():
         print(f"Stages with no entered/exited date property in HubSpot (no column): "
               f"{', '.join(stage_labels[i] for i in skipped)}")
     properties = BASE_PROPERTIES + stage_columns
+    probe_calls_access(hs_headers)
     owners = fetch_owners(hs_headers)
     print(f"Owners loaded: {len(owners)}")
 
@@ -989,6 +1045,20 @@ def main():
     print(f"Total deals: {len(deals)} ({time.monotonic() - t0:.0f}s)")
     if not deals:
         fail("HubSpot returned no deals — refusing to write an empty report.")
+
+    # California and Washington only — see ALLOWED_STATES.
+    kept, other = [], []
+    for d in deals:
+        state = d.get("properties", {}).get("legal_pipeline")
+        if state in ALLOWED_STATES:
+            kept.append(d)
+        else:
+            other.append(state or "(blank)")
+    dropped = pd.Series(other, dtype=object).value_counts()
+    if len(dropped):
+        print(f"Dropped {int(dropped.sum())} deals outside California / Washington: "
+              + ", ".join(f"{v}: {n}" for v, n in dropped.items()))
+    deals = kept
 
     # One row per deal, every one dated, none outside the pulled range. The windows already
     # guarantee it; checking the rows themselves means a filter that ever
@@ -1009,6 +1079,7 @@ def main():
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
+    df_deals = add_inbound_call(df_deals)
     df_deals = add_intake_date(df_deals)
     df_deals = add_durations(df_deals)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
@@ -1061,6 +1132,9 @@ def main():
             col = df_deals[header].dropna()
             median = f"{col.median():.0f}" if len(col) else "-"
             print(f"    {header}: {len(col)} rows, median {median}, negative {int((col < 0).sum())}")
+        print("DRY RUN: Created by Inbound Call:")
+        for v, n in df_deals["Created by Inbound Call"].value_counts().items():
+            print(f"    {n:>6}  {v}")
         print("DRY RUN: Date - Intake by source:")
         for v, n in df_deals["Intake Date Source"].value_counts(dropna=False).items():
             print(f"    {n:>6}  {v}")

@@ -104,7 +104,8 @@ def test_ab1755_maps_stored_manufacturer_values():
     assert main.ab1755_for("General Motors LLC") == "Opt In"
     assert main.ab1755_for("Toyota Motor Sales, U.S.A., Inc. / Lexus") == "Opt Out"
     assert main.ab1755_for("Winnebago Industries, Inc.") == "Not on list"
-    assert main.ab1755_for(None) is None
+    assert main.ab1755_for(None) == "Not on list"
+    assert main.ab1755_for("") == "Not on list"
     assert not (main.AB1755_OPT_IN & main.AB1755_OPT_OUT)
 
 
@@ -332,6 +333,14 @@ def test_window_label():
     assert main.window_label(P.localize(datetime(2023, 3, 1)), P.localize(datetime(2023, 4, 1))) == "2023-03"
     assert main.window_label(P.localize(datetime(2023, 12, 1)), P.localize(datetime(2024, 1, 1))) == "2023-12"
     assert ".." in main.window_label(P.localize(datetime(2023, 3, 1)), P.localize(datetime(2023, 3, 16)))
+
+
+def test_inbound_call_from_aircall_name_or_entry_number():
+    assert main.inbound_call_for("Aircall new contact, +13234869961", None) == "Yes"
+    assert main.inbound_call_for("AIRCALL NEW CONTACT, +1", None) == "Yes"
+    assert main.inbound_call_for("Doe, Jane", "+1 213-513-7639") == "Yes"   # renamed, line kept
+    assert main.inbound_call_for("Doe, Jane", None) == "No"
+    assert main.inbound_call_for(None, None) == "No"
 
 
 def test_unique_headers():

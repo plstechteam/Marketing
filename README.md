@@ -15,6 +15,10 @@ side and the four cycle times, all recomputed on every run. The script only does
 id → name, dropdown value → the label HubSpot shows — and converts dates to
 California time (`America/Los_Angeles`).
 
+**California and Washington only.** Deals in the Lemon Law pipeline whose
+Lemon Law - State is anything else ("Employment Law" — 12 in September 2026)
+are dropped, as in the Monthly Settlement Report; the log counts them.
+
 ## How it runs
 
 Same pattern as the Monthly Settlement Report: the workflow is
@@ -70,7 +74,7 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 |---|---|
 | **Deal** | Record ID, Deal Name, Lemon Law - State, Create Date |
 | **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Is Closed, Is Settled, Date entered current stage, Close Date, Close Date Source |
-| **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
+| **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, Created by Inbound Call, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
 | **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
 | **Milestones** | Date - Intake, Intake Date Source, Date - Inquiry Qualified, Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
 | **Outcome** | Case Category, Date - Settled, Total Settled Attorneys Fees and Cost, Net Attorney Fees, Close Out Reason, Date - Closed Out, Date - Close Out After Retained, Legal Sub Phase |
@@ -100,12 +104,19 @@ still comes out, just before Audit — and a test fails until it is placed.
   Referred Out (Referred Out - Complete) or Date - Closed Out then Date - Close Out After Retained
   (the rest), and the date the deal entered its current stage when that field
   is blank. Close Date Source names the field used, by its label.
-- **AB 1755 (Manufacturer)** — `Opt In`, `Opt Out` or `Not on list`, from the
+- **AB 1755 (Manufacturer)** — `Opt In`, `Opt Out` or `Not on list` (also for
+  deals with no manufacturer, so it is never blank), from the
   published AB 1755 list (`AB1755_OPT_IN` / `AB1755_OPT_OUT`, keyed on the
   stored manufacturer value). Genesis files under Hyundai, Infiniti under
   Nissan; Isuzu has no value in HubSpot. AB 1755 is California law — filter
   Lemon Law - State to California for the split. Checked against RO Review
   (Final Decision) on 2026 deals: 2 of 485 disagree.
+- **Created by Inbound Call** — Yes / No: Yes when the deal was created by an
+  inbound call to an Aircall line (named "Aircall new contact, +1…" by the
+  deal-creation automation, or carrying an AirCall Entry Number; the name is
+  usually replaced after intake). Outbound cannot be read from the deal — it
+  needs the direction of the deal's first call on HubSpot's Calls object;
+  every run logs whether the token can read it ("Calls API: …").
 - **Manufacturer** is the full legal name, e.g. "General Motors LLC".
 - **People** columns are names; archived people resolve through the owner list.
 - **Stage history** — HubSpot has no "date entered" property for four stages:
