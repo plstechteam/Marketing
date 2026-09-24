@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -677,18 +678,30 @@ def probe_calls_access(headers):
         print(f"Calls API: not readable ({r.status_code}) {detail[:200]}")
 
 
+CALL_READ_WORKERS = 8   # parallel calls batch reads; request_with_retry absorbs 429s
+
+
+def earliest_call(calls):
+    """(direction, timestamp) of the earliest call among (direction, timestamp)
+    pairs; calls without a timestamp only count when none has one."""
+    dated = [c for c in calls if c[1]]
+    if not dated:
+        return calls[0] if calls else (None, None)
+    return min(dated, key=lambda c: pd.Timestamp(c[1]))
+
+
 def fetch_first_calls(deal_ids, headers):
-    """{deal id: (direction, timestamp)} of each deal's first call.
+    """{deal id: (direction, timestamp)} of each deal's earliest call.
 
     Aircall logs every call on HubSpot's Calls object with hs_call_direction
-    (INBOUND / OUTBOUND). Reading all ~1.5 million calls would take far too
-    long, so: the deal→call associations are read in batches of 1,000 deals,
-    the lowest call id on each deal is taken as its first call (HubSpot ids
-    grow with creation; the dry run checks this against the timestamps), and
-    only those calls are read, 100 at a time.
+    (INBOUND / OUTBOUND). The deal→call associations are read in batches of
+    1,000 deals, then every associated call is read, 100 per request and
+    several requests at a time, and the call with the earliest hs_timestamp
+    wins. (Call ids do not follow call time — the lowest id was the earliest
+    call for only 2 of 3 deals — so every call has to be read.)
     """
     base = "https://api.hubapi.com"
-    first_id = {}
+    deal_calls = {}
     for i in range(0, len(deal_ids), 1000):
         chunk = deal_ids[i:i + 1000]
         r = request_with_retry("POST", f"{base}/crm/v4/associations/deals/calls/batch/read",
@@ -704,47 +717,40 @@ def fetch_first_calls(deal_ids, headers):
                     "GET", f"{base}/crm/v4/objects/deals/{deal}/associations/calls",
                     headers=headers, params={"limit": 500, "after": after})
                 if rr.status_code != 200:
-                    break
+                    fail(f"deal→call associations (next page): {rr.status_code} — {rr.text[:300]}")
                 body = rr.json()
                 ids += [int(t["toObjectId"]) for t in body.get("results", [])]
                 after = (body.get("paging") or {}).get("next", {}).get("after")
             if ids:
-                first_id[deal] = min(ids)
-    calls = {}
-    wanted = sorted(set(first_id.values()))
-    for i in range(0, len(wanted), 100):
+                deal_calls[deal] = ids
+
+    wanted = sorted({c for ids in deal_calls.values() for c in ids})
+    print(f"  {len(wanted)} calls linked to {len(deal_calls)} deals; reading them")
+
+    def read(batch):
         r = request_with_retry("POST", f"{base}/crm/v3/objects/calls/batch/read", headers=headers,
-                               json={"inputs": [{"id": str(c)} for c in wanted[i:i + 100]],
-                                     "properties": ["hs_call_direction", "hs_timestamp"]})
+                               json={"inputs": [{"id": str(c)} for c in batch],
+                                     "properties": ["hs_call_direction", "hs_timestamp", "hs_createdate"]})
         if r.status_code not in (200, 207):
-            fail(f"calls batch read: {r.status_code} — {r.text[:300]}")
+            raise RuntimeError(f"calls batch read: {r.status_code} — {r.text[:300]}")
+        out = {}
         for c in r.json().get("results", []):
             p = c.get("properties", {})
-            calls[int(c["id"])] = (p.get("hs_call_direction"), p.get("hs_timestamp"))
-    return {deal: calls.get(cid, (None, None)) for deal, cid in first_id.items()}
+            out[int(c["id"])] = (p.get("hs_call_direction"), p.get("hs_timestamp") or p.get("hs_createdate"))
+        return out
 
-
-def check_first_call_is_earliest(deal_ids, headers, sample=200):
-    """Dry run only: for deals with several calls, how often is the lowest
-    call id also the earliest call? Proves the shortcut fetch_first_calls
-    takes, on live data."""
-    base = "https://api.hubapi.com"
-    r = request_with_retry("POST", f"{base}/crm/v4/associations/deals/calls/batch/read",
-                           headers=headers, json={"inputs": [{"id": d} for d in deal_ids[-1000:]]})
-    if r.status_code not in (200, 207):
-        print(f"First-call check skipped: {r.status_code}")
-        return
-    multi = [[int(t["toObjectId"]) for t in x.get("to", [])] for x in r.json().get("results", [])]
-    multi = [ids for ids in multi if 2 <= len(ids) <= 100][:sample]
-    agree = 0
-    for ids in multi:
-        rr = request_with_retry("POST", f"{base}/crm/v3/objects/calls/batch/read", headers=headers,
-                                json={"inputs": [{"id": str(c)} for c in ids], "properties": ["hs_timestamp"]})
-        ts = {int(c["id"]): c.get("properties", {}).get("hs_timestamp") for c in rr.json().get("results", [])}
-        ts = {k: v for k, v in ts.items() if v}
-        if ts and min(ts, key=lambda k: pd.Timestamp(ts[k])) == min(ids):
-            agree += 1
-    print(f"DRY RUN: lowest call id is the earliest call for {agree} of {len(multi)} deals with 2+ calls")
+    calls = {}
+    batches = [wanted[i:i + 100] for i in range(0, len(wanted), 100)]
+    with ThreadPoolExecutor(max_workers=CALL_READ_WORKERS) as pool:
+        try:
+            for n, part in enumerate(pool.map(read, batches), 1):
+                calls.update(part)
+                if n % 1000 == 0:
+                    print(f"  read {n} of {len(batches)} call batches")
+        except RuntimeError as exc:
+            fail(str(exc))
+    return {deal: earliest_call([calls[c] for c in ids if c in calls])
+            for deal, ids in deal_calls.items()}
 
 
 def add_first_call(df, deals, first_calls):
@@ -1173,8 +1179,6 @@ def main():
     first_calls = fetch_first_calls([d["id"] for d in deals], hs_headers)
     print(f"First calls: {len(first_calls)} of {len(deals)} deals have a call "
           f"({time.monotonic() - t0:.0f}s)")
-    if DRY_RUN:
-        check_first_call_is_earliest([d["id"] for d in deals], hs_headers)
 
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,

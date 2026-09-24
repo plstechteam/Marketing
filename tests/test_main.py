@@ -365,6 +365,14 @@ def test_unique_headers():
         ["Close Out (a)", "Close Out (b)", "X"]
 
 
+def test_earliest_call_uses_timestamp_not_id_order():
+    calls = [("OUTBOUND", "2026-03-02T10:00:00Z"), ("INBOUND", "2026-03-01T09:00:00Z"),
+             ("OUTBOUND", None)]
+    assert main.earliest_call(calls) == ("INBOUND", "2026-03-01T09:00:00Z")
+    assert main.earliest_call([("INBOUND", None)]) == ("INBOUND", None)
+    assert main.earliest_call([]) == (None, None)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:
