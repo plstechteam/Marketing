@@ -356,8 +356,31 @@ def test_first_call_columns():
 
 def test_new_columns_sit_at_the_far_right():
     keys = [k for _, ks in main.COLUMN_GROUPS for k in ks]
-    assert keys[-2:] == ["first_call_direction", "first_call_date"]
+    assert keys[-5:] == ["created_by_inbound_call", "first_call_direction", "first_call_date",
+                         "intake_date_source", "date___inquiry_qualified"]
     assert main.COLUMN_GROUPS[-1][0] == "Added later"
+
+
+def test_columns_the_maz_tab_reads_stay_put():
+    # Maz reads Deals by letter; these are the columns its formulas were built on.
+    keys = [k for _, ks in main.COLUMN_GROUPS for k in ks]
+    letters = {}
+    for i, k in enumerate(keys):
+        n, col = i + 1, ""
+        while n:
+            n, r = divmod(n - 1, 26)
+            col = chr(65 + r) + col
+        letters[col] = k
+    assert letters["A"] == "hs_object_id"
+    assert letters["C"] == "legal_pipeline"
+    assert letters["D"] == "createdate"
+    assert letters["E"] == "dealstage"
+    assert letters["X"] == "s__manufacturer"
+    assert letters["Y"] == "s__manufacturer__ab1755"
+    assert letters["AC"] == main.INTAKE_DATE
+    assert letters["AE"] == "date___retained"
+    assert letters["AF"] == main.READY_FOR_LEGAL
+    assert letters["AI"] == "date___settled"
 
 
 def test_unique_headers():

@@ -74,21 +74,28 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 |---|---|
 | **Deal** | Record ID, Deal Name, Lemon Law - State, Create Date |
 | **Current stage** | Deal Stage, Deal Stage ID, Deal Stage Order, Is Closed, Is Settled, Date entered current stage, Close Date, Close Date Source |
-| **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, Created by Inbound Call, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
+| **Source / channel** | Lead - Source, Lead - Source (Group), Original Traffic Source, Original Traffic Source Drill-Down 1, Record source, AirCall Entry Number, Auto Dialer Call Type, TF: UTM Source / Medium / Campaign, GCLID |
 | **Vehicle / AB 1755** | Manufacturer, AB 1755 (Manufacturer), RO Review (Final Decision), Vehicle - Year, Vehicle - Model |
-| **Milestones** | Date - Intake, Intake Date Source, Date - Inquiry Qualified, Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
+| **Milestones** | Date - Intake, Date - RO Review, Date - Retainer Signed, Date - Ready for Legal (Exited File Set Up), Date - Referred Out |
 | **Outcome** | Case Category, Date - Settled, Total Settled Attorneys Fees and Cost, Net Attorney Fees, Close Out Reason, Date - Closed Out, Date - Close Out After Retained, Legal Sub Phase |
 | **Cycle time (days)** | Created to Intake, Created to RO Review, Intake to Retainer Signed, RO Review to Retainer Signed, Retainer Signed to Ready for Legal, RO Review to Ready for Legal, Intake to Ready for Legal, Created to Ready for Legal, Created to Settled |
 | **People** | Deal Owner, Deal Owner ID, Intake - Case Supervisor, Senior Case Supervisor, Legal - Handling Attorney, Settlement Attorney |
 | **Stage history** | Date entered "<stage>" for every stage, in pipeline order |
 | **Audit** | Pipeline, Last Modified Date, Last Refresh |
-| **Added later** | First Call Direction, First Call Date |
+| **Added later** | Created by Inbound Call, First Call Direction, First Call Date, Intake Date Source, Date - Inquiry Qualified |
 
 **New columns go at the far right** (the "Added later" group), never in the
 middle: formulas on other tabs (Maz) read Deals by column letter, and a
 column inserted in the middle shifts every letter after it. A property added
 to `BASE_PROPERTIES` without a place in `COLUMN_GROUPS` also lands at the far
 right (and a test fails until it is placed).
+
+**Columns A..AI are frozen.** Maz reads A Record ID, C Lemon Law - State,
+D Create Date, E Deal Stage, X Manufacturer, Y AB 1755, AC Date - Intake,
+AE Date - Retainer Signed, AF Date - Ready for Legal and AI Date - Settled;
+a test fails if any of them moves. (PRs #8 and #9 had inserted three columns
+mid-sheet, which slid Maz onto the wrong columns; they now sit in "Added
+later".)
 
 **Formula guard.** Every run lists the Deals columns other tabs read (cell
 formulas, defined names, charts) and **refuses to write** if the header under
@@ -151,7 +158,7 @@ names the column, the header change and the formulas that read it.
      was never back-filled into the stamp: 40,567 deals created before 2026
      carry it, none created in 2026). The stamp always wins. **Intake Date
      Source** says which one each row used; both originals stay in the sheet
-     (the stamp in Stage history, Inquiry Qualified next to Date - Intake).
+     (the stamp in Stage history, Inquiry Qualified in Added later).
      Checked on samples: Inquiry Qualified is on or before Sign Up for 99% of
      2021 and 100% of 2023 signed cases, 85% of 2025's
   2. **RO Review** — Date - RO Review

@@ -578,13 +578,18 @@ FIXED_HEADERS = {
 # is on, the milestones on the way, how it ended, who is on it, and the full
 # stage history. "STAGE_HISTORY" expands to one date column per pipeline
 # stage, in pipeline order.
+#
+# Columns A..AI are frozen: the Maz tab reads Deals by letter (AC Date -
+# Intake, AE Date - Retainer Signed, AF Ready for Legal, AI Date - Settled,
+# X Manufacturer, Y AB 1755, plus A, C, D, E). Anything new goes in "Added
+# later", at the far right.
 COLUMN_GROUPS = [
     ("Deal", ["hs_object_id", "dealname", "legal_pipeline", "createdate"]),
     ("Current stage", ["dealstage", "dealstage__id", "dealstage__order", "dealstage__closed", "is_settled",
                        "hs_v2_date_entered_current_stage", "close_date", "close_date_source"]),
     ("Source / channel", ["lead___source", "lead___source__group_", "hs_analytics_source",
                           "hs_analytics_source_data_1", "hs_object_source_label",
-                          "created_by_inbound_call", "aircall_entry_number", "auto_dialer_call_type",
+                          "aircall_entry_number", "auto_dialer_call_type",
                           "tf__utm_source", "tf__utm_medium", "tf__utm_campaign", "gclid"]),
     ("Vehicle / AB 1755", ["s__manufacturer", "s__manufacturer__ab1755",
                            "ro_review__final_decision_", "vehicle___year",
@@ -593,7 +598,7 @@ COLUMN_GROUPS = [
     # to Legal. Date - Intake is the stage stamp back-filled with Inquiry
     # Qualified (see add_intake_date); both originals stay for audit — the
     # stamp in Stage history, Inquiry Qualified here.
-    ("Milestones", [INTAKE_DATE, "intake_date_source", INTAKE_LEGACY, "date___ro_review",
+    ("Milestones", [INTAKE_DATE, "date___ro_review",
                     "date___retained", READY_FOR_LEGAL, "date___referred_out"]),
     ("Outcome", ["case_category", "date___settled", "total_settled_attorneys_fees_and_cost",
                  "net_attorney_fees", "drop_reason", "date___dropped",
@@ -608,7 +613,8 @@ COLUMN_GROUPS = [
     # right, never in the groups above — inserting in the middle shifts every
     # letter after it. The run also refuses to write if a column another tab
     # reads would change header (see splice.shifted_references).
-    ("Added later", ["first_call_direction", "first_call_date"]),
+    ("Added later", ["created_by_inbound_call", "first_call_direction", "first_call_date",
+                     "intake_date_source", INTAKE_LEGACY]),
 ]
 
 
