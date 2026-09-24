@@ -6,7 +6,9 @@ SharePoint via Microsoft Graph. The workbook is the source for a Power BI funnel
 calculation lives in Power BI, none of it here.
 """
 
+import gzip
 import io
+import json
 import os
 import sys
 import threading
@@ -37,6 +39,8 @@ FILE_PATH = (os.environ.get("SHAREPOINT_FILE_PATH") or
 DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 # One-off: let a run change a Deals column other tabs read (e.g. to move
 # columns back under formulas that were built for them). Never left on.
+# Read every call again instead of trusting the calls cache (it is rebuilt).
+REBUILD_CALLS_CACHE = os.environ.get("REBUILD_CALLS_CACHE", "").strip().lower() in ("1", "true", "yes")
 ACCEPT_COLUMN_CHANGES = os.environ.get("ACCEPT_COLUMN_CHANGES", "").strip().lower() in ("1", "true", "yes")
 
 PIPELINE_ID = "default"          # Lemon Law. Employment Law is out of scope.
@@ -219,27 +223,58 @@ RETRY_STATUS   = {429, 500, 502, 503, 504}
 LOCKED_STATUS      = 423
 LOCKED_RETRY_DELAY = 60
 
-# HubSpot allows a private app ~100 requests per rolling 10 seconds (more on
-# higher tiers). Every HubSpot request, from any thread, waits for its slot so
-# the parallel call reads stay under it; a 429 still gets retried.
-HUBSPOT_HOST        = "api.hubapi.com"
-HUBSPOT_MAX_PER_SEC = 8
-RATE_LIMIT_ATTEMPTS = 8     # 429s clear once the 10-second window rolls
-RATE_LIMIT_DELAY    = 10
+# HubSpot allows a private app a number of requests per rolling 10 seconds
+# (100 to 190 by tier; the first response says which, in its
+# X-HubSpot-RateLimit-* headers) and its search endpoints 5 per second on top
+# of that. Every HubSpot request, from any thread, waits for a slot on the
+# matching pacer so parallel reads stay under both; a 429 still gets retried.
+HUBSPOT_HOST         = "api.hubapi.com"
+HUBSPOT_MAX_PER_SEC  = 8     # until the rate-limit headers say otherwise
+HUBSPOT_SEARCH_PER_SEC = 4
+RATE_LIMIT_SHARE     = 0.8   # of the advertised limit — headroom for retries
+RATE_LIMIT_ATTEMPTS  = 8     # 429s clear once the 10-second window rolls
+RATE_LIMIT_DELAY     = 10
 
 session = requests.Session()
-session.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=16))
-_slot_lock = threading.Lock()
-_next_slot = [0.0]
+session.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=32))
 
 
-def _wait_for_hubspot_slot():
-    with _slot_lock:
-        now = time.monotonic()
-        start = max(now, _next_slot[0])
-        _next_slot[0] = start + 1.0 / HUBSPOT_MAX_PER_SEC
-    if start > now:
-        time.sleep(start - now)
+class Pacer:
+    """Hands out request start times no closer than 1/rate apart, across threads."""
+
+    def __init__(self, per_sec):
+        self.per_sec = per_sec
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + 1.0 / self.per_sec
+        if start > now:
+            time.sleep(start - now)
+
+
+HUBSPOT_PACER = Pacer(HUBSPOT_MAX_PER_SEC)
+SEARCH_PACER = Pacer(HUBSPOT_SEARCH_PER_SEC)
+_limit_read = [False]
+
+
+def _adopt_rate_limit(response):
+    """Set the general pacer from the first X-HubSpot-RateLimit-* headers."""
+    if _limit_read[0]:
+        return
+    try:
+        cap = int(response.headers["X-HubSpot-RateLimit-Max"])
+        interval = int(response.headers["X-HubSpot-RateLimit-Interval-Milliseconds"]) / 1000
+    except (KeyError, ValueError):
+        return
+    _limit_read[0] = True
+    if cap > 0 and interval > 0:
+        HUBSPOT_PACER.per_sec = max(1.0, cap / interval * RATE_LIMIT_SHARE)
+        print(f"HubSpot rate limit: {cap} per {interval:.0f}s — pacing at "
+              f"{HUBSPOT_PACER.per_sec:.1f} requests/s")
 
 
 def _retry_delay(response, attempt):
@@ -263,14 +298,17 @@ def request_with_retry(method, url, *, timeout=HTTP_TIMEOUT, **kwargs):
     attempt = 0
     while True:
         attempt += 1
-        if HUBSPOT_HOST in url:
-            _wait_for_hubspot_slot()
+        hubspot = HUBSPOT_HOST in url
+        if hubspot:
+            (SEARCH_PACER if url.rstrip("/").endswith("/search") else HUBSPOT_PACER).wait()
         try:
             response = session.request(method, url, timeout=timeout, **kwargs)
         except requests.RequestException as exc:
             response = None
             reason = f"network error: {exc}"
         else:
+            if hubspot:
+                _adopt_rate_limit(response)
             if (response.status_code not in RETRY_STATUS
                     and response.status_code != LOCKED_STATUS):
                 return response
@@ -715,36 +753,105 @@ def probe_calls_access(headers):
         print(f"Calls API: not readable ({r.status_code}) {detail[:200]}")
 
 
-CALL_READ_WORKERS = 6   # parallel calls batch reads, paced by HUBSPOT_MAX_PER_SEC
+CALL_READ_WORKERS = 10   # parallel reads; the pacers set the actual rate
+CALLS_CACHE_VERSION = 1
 
 
 def earliest_call(calls):
-    """(direction, timestamp) of the earliest call among (direction, timestamp)
-    pairs; calls without a timestamp only count when none has one."""
-    dated = [c for c in calls if c[1]]
+    """The earliest of some calls, each a tuple ending in its timestamp;
+    calls without a timestamp only count when none has one."""
+    dated = [c for c in calls if c[-1]]
     if not dated:
         return calls[0] if calls else (None, None)
-    return min(dated, key=lambda c: pd.Timestamp(c[1]))
+    return min(dated, key=lambda c: pd.Timestamp(c[-1]))
 
 
-def fetch_first_calls(deal_ids, headers):
-    """{deal id: (direction, timestamp)} of each deal's earliest call.
+def encode_calls_cache(seen, first):
+    """gzip JSON: every call id already read (sorted, stored as gaps, which
+    keeps 1.5 million ids to a few MB) and each deal's first call as
+    [call id, direction, timestamp]. Ids only — no names or client data."""
+    ids = sorted(seen)
+    gaps = [b - a for a, b in zip([0] + ids[:-1], ids)]
+    body = {"version": CALLS_CACHE_VERSION, "seen_gaps": gaps,
+            "first": {d: list(v) for d, v in first.items()}}
+    return gzip.compress(json.dumps(body, separators=(",", ":")).encode(), compresslevel=6)
 
-    Aircall logs every call on HubSpot's Calls object with hs_call_direction
-    (INBOUND / OUTBOUND). The deal→call associations are read in batches of
-    1,000 deals, then every associated call is read, 100 per request and
-    several requests at a time, and the call with the earliest hs_timestamp
-    wins. (Call ids do not follow call time — the lowest id was the earliest
-    call for only 2 of 3 deals — so every call has to be read.)
-    """
+
+def decode_calls_cache(raw):
+    """(seen, first) from encode_calls_cache's bytes, or None if unusable."""
+    try:
+        body = json.loads(gzip.decompress(raw))
+        if body.get("version") != CALLS_CACHE_VERSION:
+            return None
+        seen, total = set(), 0
+        for gap in body["seen_gaps"]:
+            total += gap
+            seen.add(total)
+        first = {str(d): (int(v[0]), v[1], v[2]) for d, v in body["first"].items()}
+        return seen, first
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def plan_call_reads(deal_calls, seen, first):
+    """{deal: [call ids to read]} — only what the cache cannot answer.
+
+    A deal with a cached first call that is still linked to it needs only
+    its calls not read before; any other deal with calls (new, or its cached
+    first call unlinked or deleted) has all of its calls read."""
+    plan = {}
+    for deal, ids in deal_calls.items():
+        cached = first.get(deal)
+        if cached is not None and cached[0] in ids:
+            need = [c for c in ids if c not in seen]
+        else:
+            need = list(ids)
+        if need:
+            plan[deal] = need
+    return plan
+
+
+def merge_first_calls(deal_calls, seen, first, plan, read):
+    """(first calls {deal: (id, direction, timestamp)}, seen ids to cache).
+
+    Each deal's first call is the earliest of its cached first call (when
+    still linked) and the calls just read for it."""
+    merged = {}
+    for deal, ids in deal_calls.items():
+        cached = first.get(deal)
+        candidates = [cached] if cached is not None and cached[0] in ids else []
+        candidates += [(c, *read[c]) for c in plan.get(deal, []) if c in read]
+        if candidates:
+            merged[deal] = earliest_call(candidates)
+    linked = {c for ids in deal_calls.values() for c in ids}
+    return merged, (seen | set(read)) & linked
+
+
+def _parallel(fn, items, label):
+    """fn over items on CALL_READ_WORKERS threads, in order; a RuntimeError
+    from any of them fails the run."""
+    out = []
+    with ThreadPoolExecutor(max_workers=CALL_READ_WORKERS) as pool:
+        try:
+            for n, part in enumerate(pool.map(fn, items), 1):
+                out.append(part)
+                if n % 2000 == 0:
+                    print(f"  {label}: {n} of {len(items)}")
+        except RuntimeError as exc:
+            fail(str(exc))
+    return out
+
+
+def fetch_deal_calls(deal_ids, headers):
+    """{deal id: [call ids]} for every deal with calls, 1,000 deals per request."""
     base = "https://api.hubapi.com"
-    deal_calls = {}
-    for i in range(0, len(deal_ids), 1000):
-        chunk = deal_ids[i:i + 1000]
+
+    def read(chunk):
         r = request_with_retry("POST", f"{base}/crm/v4/associations/deals/calls/batch/read",
                                headers=headers, json={"inputs": [{"id": d} for d in chunk]})
         if r.status_code not in (200, 207):
-            fail(f"deal→call associations: {r.status_code} — {r.text[:300]}")
+            raise RuntimeError(f"deal→call associations: {r.status_code} — {r.text[:300]}")
+        out = {}
         for item in r.json().get("results", []):
             deal = str(item["from"]["id"])
             ids = [int(t["toObjectId"]) for t in item.get("to", [])]
@@ -754,18 +861,28 @@ def fetch_first_calls(deal_ids, headers):
                     "GET", f"{base}/crm/v4/objects/deals/{deal}/associations/calls",
                     headers=headers, params={"limit": 500, "after": after})
                 if rr.status_code != 200:
-                    fail(f"deal→call associations (next page): {rr.status_code} — {rr.text[:300]}")
+                    raise RuntimeError(f"deal→call associations (next page): "
+                                       f"{rr.status_code} — {rr.text[:300]}")
                 body = rr.json()
                 ids += [int(t["toObjectId"]) for t in body.get("results", [])]
                 after = (body.get("paging") or {}).get("next", {}).get("after")
             if ids:
-                deal_calls[deal] = ids
+                out[deal] = ids
+        return out
 
-    wanted = sorted({c for ids in deal_calls.values() for c in ids})
-    print(f"  {len(wanted)} calls linked to {len(deal_calls)} deals; reading them")
+    chunks = [deal_ids[i:i + 1000] for i in range(0, len(deal_ids), 1000)]
+    deal_calls = {}
+    for part in _parallel(read, chunks, "association batches"):
+        deal_calls.update(part)
+    return deal_calls
+
+
+def read_calls(call_ids, headers):
+    """{call id: (direction, timestamp)}, 100 calls per request."""
+    url = "https://api.hubapi.com/crm/v3/objects/calls/batch/read"
 
     def read(batch):
-        r = request_with_retry("POST", f"{base}/crm/v3/objects/calls/batch/read", headers=headers,
+        r = request_with_retry("POST", url, headers=headers,
                                json={"inputs": [{"id": str(c)} for c in batch],
                                      "properties": ["hs_call_direction", "hs_timestamp", "hs_createdate"]})
         if r.status_code not in (200, 207):
@@ -776,18 +893,36 @@ def fetch_first_calls(deal_ids, headers):
             out[int(c["id"])] = (p.get("hs_call_direction"), p.get("hs_timestamp") or p.get("hs_createdate"))
         return out
 
+    ids = sorted(call_ids)
     calls = {}
-    batches = [wanted[i:i + 100] for i in range(0, len(wanted), 100)]
-    with ThreadPoolExecutor(max_workers=CALL_READ_WORKERS) as pool:
-        try:
-            for n, part in enumerate(pool.map(read, batches), 1):
-                calls.update(part)
-                if n % 1000 == 0:
-                    print(f"  read {n} of {len(batches)} call batches")
-        except RuntimeError as exc:
-            fail(str(exc))
-    return {deal: earliest_call([calls[c] for c in ids if c in calls])
-            for deal, ids in deal_calls.items()}
+    for part in _parallel(read, [ids[i:i + 100] for i in range(0, len(ids), 100)], "call batches"):
+        calls.update(part)
+    return calls
+
+
+def fetch_first_calls(deal_ids, headers, cache):
+    """({deal id: (direction, timestamp)} of each deal's earliest call, the
+    new cache as (seen, first)).
+
+    Aircall logs every call on HubSpot's Calls object with hs_call_direction
+    (INBOUND / OUTBOUND). Call ids do not follow call time — the lowest id was
+    the earliest call for only 2 of 3 deals — so the earliest call has to
+    come from the timestamps of every call on the deal. Reading all ~1.5
+    million takes half an hour, so the calls already read, and each deal's
+    first call, are kept in a cache next to the workbook: a run reads the
+    associations (all of them, every run) and then only the calls it has not
+    seen. Without a cache (first run, or a rebuild) every call is read.
+    """
+    seen, first = cache if cache else (set(), {})
+    deal_calls = fetch_deal_calls(deal_ids, headers)
+    plan = plan_call_reads(deal_calls, seen, first)
+    wanted = {c for ids in plan.values() for c in ids}
+    linked = sum(len(ids) for ids in deal_calls.values())
+    print(f"  {linked} calls linked to {len(deal_calls)} deals; "
+          f"{len(wanted)} not in the cache — reading them")
+    read = read_calls(wanted, headers) if wanted else {}
+    merged, seen = merge_first_calls(deal_calls, seen, first, plan, read)
+    return {d: (v[1], v[2]) for d, v in merged.items()}, (seen, merged)
 
 
 def add_first_call(df, deals, first_calls):
@@ -843,8 +978,11 @@ def window_label(start, end):
     return f"{start:%Y-%m-%d %H:%M}..{end:%Y-%m-%d %H:%M}"
 
 
-def fetch_deals(properties, windows, headers):
-    """Every deal created in the windows, each window paged to the end.
+DEAL_SEARCH_WORKERS = 4   # months pulled at once; SEARCH_PACER sets the rate
+
+
+def fetch_window(properties, start, end, headers):
+    """Every deal created in [start, end), paged to the end.
 
     A window whose HubSpot total reaches the search API's 10,000-result
     ceiling is split in half and each half pulled on its own, as often as it
@@ -855,59 +993,64 @@ def fetch_deals(properties, windows, headers):
     full history (~230,000 deals) keeping every null would cost gigabytes.
     """
     url = "https://api.hubapi.com/crm/v3/objects/deals/search"
-    deals = {}
-    pending = list(reversed(windows))
-    while pending:
-        start, end = pending.pop()
-        payload = {
-            "properties": properties,
-            "limit": SEARCH_PAGE_SIZE,
-            "sorts": [{"propertyName": "hs_object_id", "direction": "ASCENDING"}],
-            "filterGroups": [{"filters": [
-                {"propertyName": "pipeline", "operator": "EQ", "value": PIPELINE_ID},
-                {"propertyName": "createdate", "operator": "GTE", "value": to_epoch_ms(start)},
-                {"propertyName": "createdate", "operator": "LT", "value": to_epoch_ms(end)},
-            ]}],
-        }
-        window_rows = 0
-        total = None
-        after = None
-        split = False
-        while True:
-            if after:
-                payload["after"] = after
-            r = request_with_retry("POST", url, headers=headers, json=payload)
-            if r.status_code != 200:
-                fail(f"deal search: {r.status_code} — {r.text}")
-            data = r.json()
-            total = data.get("total", total)
-            if total is not None and total >= SEARCH_API_MAX_RESULTS and after is None:
-                if end - start < pd.Timedelta(minutes=1):
-                    fail(f"{window_label(start, end)}: {total} deals in under a minute — "
-                         "cannot split further; nothing written.")
-                middle = start + (end - start) / 2
-                print(f"  {window_label(start, end)}: {total} deals — splitting in two")
-                pending.append((middle, end))
-                pending.append((start, middle))
-                split = True
-                break
-            for deal in data.get("results", []):
-                props = {k: v for k, v in deal.get("properties", {}).items() if v not in (None, "")}
-                deals[deal["id"]] = {"id": deal["id"], "properties": props}
-                window_rows += 1
-            after = data.get("paging", {}).get("next", {}).get("after")
-            if not after:
-                break
-        if split:
-            continue
+    payload = {
+        "properties": properties,
+        "limit": SEARCH_PAGE_SIZE,
+        "sorts": [{"propertyName": "hs_object_id", "direction": "ASCENDING"}],
+        "filterGroups": [{"filters": [
+            {"propertyName": "pipeline", "operator": "EQ", "value": PIPELINE_ID},
+            {"propertyName": "createdate", "operator": "GTE", "value": to_epoch_ms(start)},
+            {"propertyName": "createdate", "operator": "LT", "value": to_epoch_ms(end)},
+        ]}],
+    }
+    rows = []
+    total = None
+    after = None
+    while True:
+        if after:
+            payload["after"] = after
+        r = request_with_retry("POST", url, headers=headers, json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(f"deal search: {r.status_code} — {r.text}")
+        data = r.json()
+        total = data.get("total", total)
+        if total is not None and total >= SEARCH_API_MAX_RESULTS and after is None:
+            if end - start < pd.Timedelta(minutes=1):
+                raise RuntimeError(f"{window_label(start, end)}: {total} deals in under a minute — "
+                                   "cannot split further; nothing written.")
+            middle = start + (end - start) / 2
+            print(f"  {window_label(start, end)}: {total} deals — splitting in two")
+            return (fetch_window(properties, start, middle, headers)
+                    + fetch_window(properties, middle, end, headers))
+        for deal in data.get("results", []):
+            props = {k: v for k, v in deal.get("properties", {}).items() if v not in (None, "")}
+            rows.append({"id": deal["id"], "properties": props})
+        after = data.get("paging", {}).get("next", {}).get("after")
+        if not after:
+            break
 
-        print(f"  {window_label(start, end)}: {window_rows} deals (HubSpot total {total})")
-        if window_rows >= SEARCH_API_MAX_RESULTS:
-            fail(f"{window_label(start, end)} reached the {SEARCH_API_MAX_RESULTS:,}-result "
-                 "search ceiling — the pull would be truncated; nothing written.")
-        if total is not None and window_rows < total:
-            fail(f"{window_label(start, end)}: downloaded {window_rows} of {total} — "
-                 "incomplete pull, nothing written.")
+    print(f"  {window_label(start, end)}: {len(rows)} deals (HubSpot total {total})")
+    if len(rows) >= SEARCH_API_MAX_RESULTS:
+        raise RuntimeError(f"{window_label(start, end)} reached the {SEARCH_API_MAX_RESULTS:,}-result "
+                           "search ceiling — the pull would be truncated; nothing written.")
+    if total is not None and len(rows) < total:
+        raise RuntimeError(f"{window_label(start, end)}: downloaded {len(rows)} of {total} — "
+                           "incomplete pull, nothing written.")
+    return rows
+
+
+def fetch_deals(properties, windows, headers):
+    """Every deal created in the windows, several windows at a time, in
+    window order (then by id), each deal once."""
+    deals = {}
+    with ThreadPoolExecutor(max_workers=DEAL_SEARCH_WORKERS) as pool:
+        try:
+            parts = list(pool.map(lambda w: fetch_window(properties, w[0], w[1], headers), windows))
+        except RuntimeError as exc:
+            fail(str(exc))
+    for rows in parts:
+        for deal in rows:
+            deals[deal["id"]] = deal
     return list(deals.values())
 
 
@@ -949,6 +1092,44 @@ def fetch_existing(token):
     if r.status_code != 200:
         fail(f"SharePoint download: {r.status_code} — {r.text}")
     return r.content, etag
+
+
+def calls_cache_path():
+    """The calls cache sits next to the workbook: Marketing_calls_cache.json.gz."""
+    return FILE_PATH.rsplit(".", 1)[0] + "_calls_cache.json.gz"
+
+
+def fetch_calls_cache(token):
+    """(seen, first) from SharePoint, or None when missing or unreadable."""
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{calls_cache_path()}:/content"
+    r = request_with_retry("GET", url, headers={"Authorization": f"Bearer {token}"},
+                           timeout=UPLOAD_TIMEOUT)
+    if r.status_code == 404:
+        print("Calls cache: none yet — every call will be read (about 30 minutes, once)")
+        return None
+    if r.status_code != 200:
+        print(f"Calls cache: could not read it ({r.status_code}) — reading every call")
+        return None
+    cache = decode_calls_cache(r.content)
+    if cache is None:
+        print("Calls cache: unreadable or an old format — reading every call")
+    else:
+        print(f"Calls cache: {len(cache[0])} calls and {len(cache[1])} deals' first calls "
+              f"({len(r.content) / 1024:.0f} KB)")
+    return cache
+
+
+def upload_calls_cache(token, seen, first):
+    raw = encode_calls_cache(seen, first)
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:/{calls_cache_path()}:/content"
+    r = request_with_retry("PUT", url, headers={"Authorization": f"Bearer {token}",
+                                                "Content-Type": "application/gzip"},
+                           data=raw, timeout=UPLOAD_TIMEOUT)
+    if r.status_code not in (200, 201):
+        # Not fatal: the next run just reads more calls.
+        print(f"Calls cache: upload failed ({r.status_code}) — the next run reads more calls")
+        return
+    print(f"Calls cache saved: {len(seen)} calls, {len(first)} deals ({len(raw) / 1024:.0f} KB)")
 
 
 def other_sheet_parts(xlsx_bytes, report):
@@ -1160,7 +1341,7 @@ def main():
         fail(f"Missing environment variables: {', '.join(missing)}")
     print("All credentials loaded OK")
     if DRY_RUN:
-        print("DRY RUN: nothing will be written to SharePoint")
+        print("DRY RUN: Marketing.xlsx will not be written (the calls cache still is)")
 
     now_pacific = datetime.now(timezone.utc).astimezone(PACIFIC)
     print(f"Run started: {now_pacific.strftime('%Y-%m-%d %I:%M %p %Z')}")
@@ -1176,6 +1357,18 @@ def main():
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+
+    # SharePoint downloads (the 80 MB workbook, the calls cache) run in the
+    # background while HubSpot is read.
+    token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
+    print("Graph token obtained OK")
+    background = ThreadPoolExecutor(max_workers=2)
+    existing_job = background.submit(fetch_existing, token)
+    if REBUILD_CALLS_CACHE:
+        print("REBUILD_CALLS_CACHE is set: ignoring the calls cache, reading every call")
+        cache_job = None
+    else:
+        cache_job = background.submit(fetch_calls_cache, token)
 
     pipeline_label, stages = fetch_pipeline(hs_headers)
     print(f"Pipeline '{pipeline_label}': {len(stages)} stages")
@@ -1233,9 +1426,11 @@ def main():
           + ", ".join(f"{y}: {n}" for y, n in by_year.items()))
 
     t0 = time.monotonic()
-    first_calls = fetch_first_calls([d["id"] for d in deals], hs_headers)
+    cache = cache_job.result() if cache_job else None
+    first_calls, (seen, first) = fetch_first_calls([d["id"] for d in deals], hs_headers, cache)
     print(f"First calls: {len(first_calls)} of {len(deals)} deals have a call "
           f"({time.monotonic() - t0:.0f}s)")
+    upload_calls_cache(token, seen, first)
 
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,
@@ -1250,14 +1445,12 @@ def main():
     df_deals["last_refresh"] = refreshed
     df_deals = to_sheet(df_deals, definitions, stage_columns)
 
-    token = graph_token(env["AZURE_TENANT_ID"], env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"])
-    print("Graph token obtained OK")
-
     # The workbook is shared: people keep their own tabs next to Deals (Maz
     # was the first). Only the Deals sheet is replaced; every other part of
     # the file is copied byte for byte — see splice.py.
     t0 = time.monotonic()
-    existing, etag = fetch_existing(token)
+    existing, etag = existing_job.result()
+    background.shutdown()
     if existing is None:
         print(f"'{FILE_PATH}' does not exist yet — building it from scratch")
         workbook, report = build_workbook(df_deals), None

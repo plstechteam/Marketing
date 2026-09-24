@@ -144,8 +144,7 @@ run with the `accept_column_changes` input ticked.
   contact — typical of form, mailer and PPC leads the dialer works — not that
   a deal was created by an outbound call. About 3 of 4 deals have calls
   associated with the deal itself; the rest read "No calls".
-  Reading the associations and every call adds a large part of the run time;
-  all HubSpot requests are paced under its 10-second rate limit.
+  See **Calls cache** below for how this stays fast.
 - **Manufacturer** is the full legal name, e.g. "General Motors LLC".
 - **People** columns are names; archived people resolve through the owner list.
 - **Stage history** — HubSpot has no "date entered" property for four stages:
@@ -212,6 +211,25 @@ roughly 1.5s per 1,000 deals.
 A full rewrite is kept on purpose rather than updating only changed deals:
 at this size it costs seconds, and it is what guarantees the file matches
 HubSpot exactly on every run.
+
+## Calls cache
+
+Finding each deal's first call means knowing the timestamp of every call on
+it — ~1.5 million calls, half an hour to read. So the calls already read,
+and each deal's first call, are kept in **`Marketing_calls_cache.json.gz`**
+next to the workbook in SharePoint (call and deal ids, directions and
+timestamps only — no names). Every run still reads which calls each deal
+has (all deals, every run), then reads only the calls it has not seen
+before and compares them with the cached first call, so a newly linked
+earlier call still wins. A deal whose cached first call is no longer linked
+to it has all its calls read again.
+
+- The cache is written on every run, dry runs included (it is not the
+  report). Nobody needs to open it.
+- Missing or unreadable → the run reads every call once (~30 minutes) and
+  writes a fresh one. The `rebuild_calls_cache` input forces that.
+- A call edited after it was read (its direction or time changed) keeps its
+  cached values until a rebuild.
 
 ## Other tabs in the workbook are never touched
 
