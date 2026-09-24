@@ -34,8 +34,8 @@ now, plus one window before 2021 that catches any deal imported with an
 older create date. A month HubSpot reports at 10,000 deals or more (the
 search API's ceiling) is split in half until every piece fits.
 
-**Run it weekly.** A full-history run takes several minutes, almost all of
-it the HubSpot pull, so the external cron is set to once a week.
+**Run it weekly.** A full-history run takes about 7 minutes, most of it
+the HubSpot deal pull (see Run time).
 
 ## Setup
 
@@ -192,25 +192,25 @@ year.
 
 ## Run time
 
-A run takes about a minute end to end, measured in September 2026 on
-~18,000 deals:
+About **7 minutes** end to end, measured in September 2026 on ~232,000
+deals and ~1.5 million calls (dry run 35):
 
 | Step | Time |
 |---|---|
-| Runner setup (Python, cached dependencies, tests) | ~13s |
-| HubSpot pull, 9 monthly windows, ~90 requests | ~30s |
-| Building the workbook (xlsxwriter, row by row) | ~6s |
-| Graph token + upload | ~2s |
+| Runner setup (Python, cached dependencies, tests) | ~15s |
+| Deals: ~1,200 search pages, 4 months at a time | ~5 min |
+| Call links for every deal (232 batches, in parallel) | ~25s |
+| Calls not in the cache (a handful a day) | ~1s |
+| Frame, workbook splice, upload and check | ~1 min |
 
-The log prints the pull and build times on every run. The workbook used to
-take ~25s with pandas + openpyxl; xlsxwriter cut it to ~6s and the file
-shrank. The pull is bound by HubSpot's search rate limit (a few requests a
-second, shared with the Settlement job), so it grows with the year —
-roughly 1.5s per 1,000 deals.
+The workbook and the calls cache download from SharePoint while HubSpot is
+read. The deal pull is the floor: HubSpot's search API allows 5 requests a
+second and a page holds 200 deals, so it grows with the history — roughly
+1.3s per 1,000 deals. Without the calls cache (first run, or
+`rebuild_calls_cache`) add ~20–30 minutes.
 
 A full rewrite is kept on purpose rather than updating only changed deals:
-at this size it costs seconds, and it is what guarantees the file matches
-HubSpot exactly on every run.
+it is what guarantees the file matches HubSpot exactly on every run.
 
 ## Calls cache
 
