@@ -100,7 +100,9 @@ later".)
 **Formula guard.** Every run lists the Deals columns other tabs read (cell
 formulas, defined names, charts) and **refuses to write** if the header under
 any of them would change — the previous file stays as it was, and the log
-names the column, the header change and the formulas that read it.
+names the column, the header change and the formulas that read it. A
+deliberate move (such as putting columns back under Maz) needs a one-off
+run with the `accept_column_changes` input ticked.
 
 ### Column notes
 

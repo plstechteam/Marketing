@@ -35,6 +35,9 @@ FILE_PATH = (os.environ.get("SHAREPOINT_FILE_PATH") or
              "Data Inventory/PLS/Requests/Marketing.xlsx")
 
 DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+# One-off: let a run change a Deals column other tabs read (e.g. to move
+# columns back under formulas that were built for them). Never left on.
+ACCEPT_COLUMN_CHANGES = os.environ.get("ACCEPT_COLUMN_CHANGES", "").strip().lower() in ("1", "true", "yes")
 
 PIPELINE_ID = "default"          # Lemon Law. Employment Law is out of scope.
 
@@ -1279,7 +1282,9 @@ def main():
         if shifts:
             for col, where, before, after in shifts:
                 print(f"  COLUMN SHIFT {col}: '{before}' -> '{after}' — read by {', '.join(where[:5])}")
-            if DRY_RUN:
+            if ACCEPT_COLUMN_CHANGES:
+                print("ACCEPT_COLUMN_CHANGES is set: writing the new layout on purpose.")
+            elif DRY_RUN:
                 print("DRY RUN: a real run would stop here to protect those formulas.")
             else:
                 fail("a column other tabs read would change — nothing written. Put new columns "

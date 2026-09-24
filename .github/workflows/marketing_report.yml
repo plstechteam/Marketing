@@ -12,6 +12,10 @@ on:
         description: "Run the full pipeline but skip the SharePoint upload"
         type: boolean
         default: false
+      accept_column_changes:
+        description: "One-off: allow a change to Deals columns that other tabs (Maz) read"
+        type: boolean
+        default: false
       file_path:
         description: "SharePoint path to write (blank = the live Marketing.xlsx). Use this to aim a run at a TEST copy."
         type: string
@@ -53,6 +57,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: '1'
           DRY_RUN: ${{ inputs.dry_run }}
+          ACCEPT_COLUMN_CHANGES: ${{ inputs.accept_column_changes }}
           # Empty means "use the default", which is the live file; main.py
           # reads this with `or` so an empty string does not win.
           SHAREPOINT_FILE_PATH: ${{ inputs.file_path }}
