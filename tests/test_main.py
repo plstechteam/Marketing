@@ -150,8 +150,8 @@ def test_sheet_lookups_order_and_headers():
         "Manufacturer", main.AB1755_HEADER, "RO Review (Final Decision)",
         "Deal Owner", "Deal Owner ID",
         'Date entered "Intake (Lemon Law)"',  # raw stamp, Stage history
-        "Some New Property",                  # unplaced property: kept, before Audit
-        "Pipeline", "Last Refresh"]
+        "Pipeline", "Last Refresh",
+        "Some New Property"]                  # unplaced property: far right, shifts nothing
     row = sheet.iloc[0]
     assert row["Pipeline"] == "Lemon Law"
     assert row["Deal Stage"] == "Close Out" and row["Deal Stage ID"] == "5411635"
@@ -341,6 +341,23 @@ def test_inbound_call_from_aircall_name_or_entry_number():
     assert main.inbound_call_for("Doe, Jane", "+1 213-513-7639") == "Yes"   # renamed, line kept
     assert main.inbound_call_for("Doe, Jane", None) == "No"
     assert main.inbound_call_for(None, None) == "No"
+
+
+def test_first_call_columns():
+    import pandas as pd
+    deals = [{"id": "1"}, {"id": "2"}, {"id": "3"}, {"id": "4"}]
+    first = {"1": ("INBOUND", "2026-03-01T12:00:00Z"), "2": ("OUTBOUND", "2026-03-02T12:00:00Z"),
+             "3": (None, None)}
+    df = main.add_first_call(pd.DataFrame(index=range(4)), deals, first)
+    assert df["first_call_direction"].tolist() == ["Inbound", "Outbound", "Unknown", "No calls"]
+    assert df["first_call_date"].tolist()[0] == datetime(2026, 3, 1, 4, 0)
+    assert df["first_call_date"].tolist()[3] is None
+
+
+def test_new_columns_sit_at_the_far_right():
+    keys = [k for _, ks in main.COLUMN_GROUPS for k in ks]
+    assert keys[-2:] == ["first_call_direction", "first_call_date"]
+    assert main.COLUMN_GROUPS[-1][0] == "Added later"
 
 
 def test_unique_headers():

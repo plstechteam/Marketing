@@ -311,3 +311,125 @@ def sheet_row_count(xlsx_bytes, part):
     with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as z:
         return z.read(part).count(b"<row ")
 
+
+
+# ----------------------------------------------------------------------
+# Formulas in other tabs that read the sheet this job owns
+# ----------------------------------------------------------------------
+# Formulas point at Deals by column letter (Deals!AE:AE, 'Deals'!$C$2...). A
+# column inserted in the middle of Deals shifts every letter to its right, and
+# those formulas silently start reading a different column. So before writing,
+# a run finds every column letter another tab references and checks the header
+# under it is unchanged.
+
+_REF = re.compile(r"(?:'([^']+)'|([A-Za-z_][\w.]*))!(\$?[A-Z]{1,3}\$?\d*(?::\$?[A-Z]{1,3}\$?\d*)?)")
+
+
+def column_index(letters):
+    """A -> 0, Z -> 25, AA -> 26."""
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def _columns_in_ref(ref):
+    """Column letters a reference covers: 'AE:AE' -> {AE}, 'A2:C9' -> {A,B,C}."""
+    parts = [re.sub(r"[\$\d]", "", p) for p in ref.split(":")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return set()
+    lo, hi = column_index(parts[0]), column_index(parts[-1])
+    if hi - lo > 200:           # a whole-row-style reference; not a column pin
+        return set()
+    return {column_letter(i) for i in range(min(lo, hi), max(lo, hi) + 1)}
+
+
+def referenced_columns(xlsx_bytes, sheet_name):
+    """{column letter: sorted list of 'Tab!Cell' formulas that read it} for
+    every formula in every other tab (and defined names) that points at
+    sheet_name by column letter."""
+    import html
+    z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    workbook = z.read("xl/workbook.xml").decode("utf-8")
+    rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    own = _sheet_part(workbook, rels, sheet_name)
+    names = {}
+    for tag in re.findall(r"<sheet\b[^>]*/?>", workbook):
+        a = _attrs(tag)
+        rid = next((v for k, v in a.items() if k.endswith(":id")), None)
+        for rtag in re.findall(r"<Relationship\b[^>]*/?>", rels):
+            ra = _attrs(rtag)
+            if ra.get("Id") == rid:
+                t = ra["Target"]
+                names[t.lstrip("/") if t.startswith("/") else "xl/" + t] = html.unescape(a.get("name", ""))
+    found = {}
+
+    def scan(formula, where):
+        for quoted, bare, ref in _REF.findall(html.unescape(formula)):
+            if (quoted or bare) == sheet_name:
+                for col in _columns_in_ref(ref):
+                    found.setdefault(col, set()).add(where)
+
+    for part, tab in names.items():
+        if part == own or part not in z.namelist():
+            continue
+        xml = z.read(part).decode("utf-8", "replace")
+        for m in re.finditer(r'<c\b[^>]*\br="([A-Z]+\d+)"[^>]*>(.*?)</c>', xml, re.S):
+            for f in re.findall(r"<f\b[^>]*>(.*?)</f>", m.group(2), re.S):
+                scan(f, f"{tab}!{m.group(1)}")
+    for m in re.finditer(r'<definedName\b[^>]*name="([^"]*)"[^>]*>(.*?)</definedName>', workbook, re.S):
+        scan(m.group(2), f"name {m.group(1)}")
+    for part in z.namelist():
+        if part.startswith("xl/charts/") and part.endswith(".xml"):
+            xml = z.read(part).decode("utf-8", "replace")
+            for f in re.findall(r"<c:f>(.*?)</c:f>", xml, re.S):
+                scan(f, f"chart {part.rsplit('/', 1)[-1]}")
+    return {col: sorted(w) for col, w in found.items()}
+
+
+def header_row(xlsx_bytes, sheet_name):
+    """The first row of sheet_name as {column letter: text}."""
+    import html
+    z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    workbook = z.read("xl/workbook.xml").decode("utf-8")
+    rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    part = _sheet_part(workbook, rels, sheet_name)
+    shared = []
+    if "xl/sharedStrings.xml" in z.namelist():
+        sst = z.read("xl/sharedStrings.xml").decode("utf-8")
+        shared = ["".join(re.findall(r"<t\b[^>]*>(.*?)</t>", si, re.S))
+                  for si in re.findall(r"<si>(.*?)</si>", sst, re.S)]
+    with z.open(part) as f:
+        head = b""
+        while b"</row>" not in head:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            head += chunk
+    row = re.search(r"<row\b[^>]*>(.*?)</row>", head.decode("utf-8", "replace"), re.S)
+    out = {}
+    if not row:
+        return out
+    for m in re.finditer(r'<c\b([^>]*)>(.*?)</c>', row.group(1), re.S):
+        a = _attrs("<c" + m.group(1) + ">")
+        col = re.sub(r"\d", "", a.get("r", ""))
+        body = m.group(2)
+        if a.get("t") == "s":
+            v = re.search(r"<v>(\d+)</v>", body)
+            text = shared[int(v.group(1))] if v and int(v.group(1)) < len(shared) else ""
+        else:
+            text = "".join(re.findall(r"<t\b[^>]*>(.*?)</t>", body, re.S)) or \
+                "".join(re.findall(r"<v>(.*?)</v>", body, re.S))
+        out[col] = html.unescape(text)
+    return out
+
+
+def shifted_references(before, after, sheet_name):
+    """[(column, tabs/cells, header before, header after)] for every column
+    another tab reads whose header would change between the two files."""
+    refs = referenced_columns(before, sheet_name)
+    old, new = header_row(before, sheet_name), header_row(after, sheet_name)
+    return [(col, where, old.get(col), new.get(col))
+            for col, where in sorted(refs.items(), key=lambda kv: column_index(kv[0]))
+            if old.get(col) != new.get(col)]

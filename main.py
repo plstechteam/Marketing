@@ -537,6 +537,8 @@ FIXED_HEADERS = {
     "last_refresh": "Last Refresh",
     INTAKE_DATE: "Date - Intake",
     "created_by_inbound_call": "Created by Inbound Call",
+    "first_call_direction": "First Call Direction",
+    "first_call_date": "First Call Date",
     "intake_date_source": "Intake Date Source",
     READY_FOR_LEGAL: "Date - Ready for Legal (Exited File Set Up)",
     **{key: header for key, header, _, _ in DURATIONS},
@@ -572,24 +574,28 @@ COLUMN_GROUPS = [
                 "senior_case_supervisor", "handling_attorney", "supervising_attorney"]),
     ("Stage history", ["STAGE_HISTORY"]),
     ("Audit", ["pipeline", "hs_lastmodifieddate", "last_refresh"]),
+    # Columns added after people started building on the workbook (formulas
+    # on Maz read Deals by column letter). New columns go HERE, at the far
+    # right, never in the groups above — inserting in the middle shifts every
+    # letter after it. The run also refuses to write if a column another tab
+    # reads would change header (see splice.shifted_references).
+    ("Added later", ["first_call_direction", "first_call_date"]),
 ]
 
 
 def column_order(columns, stage_columns):
     """Internal column keys in sheet order. A column no group names (a
-    property added to BASE_PROPERTIES but not placed) goes just before
-    Audit rather than being dropped."""
+    property added to BASE_PROPERTIES but not placed) goes at the far right,
+    after everything else, so it can never shift a column other tabs read."""
     ordered = []
     for group, keys in COLUMN_GROUPS:
-        if group == "Audit":
-            placed = set(ordered) | set(keys)
-            ordered += [c for c in columns if c not in placed]
         for key in keys:
             if key == "STAGE_HISTORY":
                 ordered += [c for c in stage_columns if c in columns]
             elif key in columns:
                 ordered.append(key)
-    return list(dict.fromkeys(ordered))
+    ordered = list(dict.fromkeys(ordered))
+    return ordered + [c for c in columns if c not in set(ordered)]
 
 
 def header_for(key, definitions):
@@ -669,6 +675,95 @@ def probe_calls_access(headers):
         except ValueError:
             pass
         print(f"Calls API: not readable ({r.status_code}) {detail[:200]}")
+
+
+def fetch_first_calls(deal_ids, headers):
+    """{deal id: (direction, timestamp)} of each deal's first call.
+
+    Aircall logs every call on HubSpot's Calls object with hs_call_direction
+    (INBOUND / OUTBOUND). Reading all ~1.5 million calls would take far too
+    long, so: the deal→call associations are read in batches of 1,000 deals,
+    the lowest call id on each deal is taken as its first call (HubSpot ids
+    grow with creation; the dry run checks this against the timestamps), and
+    only those calls are read, 100 at a time.
+    """
+    base = "https://api.hubapi.com"
+    first_id = {}
+    for i in range(0, len(deal_ids), 1000):
+        chunk = deal_ids[i:i + 1000]
+        r = request_with_retry("POST", f"{base}/crm/v4/associations/deals/calls/batch/read",
+                               headers=headers, json={"inputs": [{"id": d} for d in chunk]})
+        if r.status_code not in (200, 207):
+            fail(f"deal→call associations: {r.status_code} — {r.text[:300]}")
+        for item in r.json().get("results", []):
+            deal = str(item["from"]["id"])
+            ids = [int(t["toObjectId"]) for t in item.get("to", [])]
+            after = (item.get("paging") or {}).get("next", {}).get("after")
+            while after:   # a deal with more calls than one page
+                rr = request_with_retry(
+                    "GET", f"{base}/crm/v4/objects/deals/{deal}/associations/calls",
+                    headers=headers, params={"limit": 500, "after": after})
+                if rr.status_code != 200:
+                    break
+                body = rr.json()
+                ids += [int(t["toObjectId"]) for t in body.get("results", [])]
+                after = (body.get("paging") or {}).get("next", {}).get("after")
+            if ids:
+                first_id[deal] = min(ids)
+    calls = {}
+    wanted = sorted(set(first_id.values()))
+    for i in range(0, len(wanted), 100):
+        r = request_with_retry("POST", f"{base}/crm/v3/objects/calls/batch/read", headers=headers,
+                               json={"inputs": [{"id": str(c)} for c in wanted[i:i + 100]],
+                                     "properties": ["hs_call_direction", "hs_timestamp"]})
+        if r.status_code not in (200, 207):
+            fail(f"calls batch read: {r.status_code} — {r.text[:300]}")
+        for c in r.json().get("results", []):
+            p = c.get("properties", {})
+            calls[int(c["id"])] = (p.get("hs_call_direction"), p.get("hs_timestamp"))
+    return {deal: calls.get(cid, (None, None)) for deal, cid in first_id.items()}
+
+
+def check_first_call_is_earliest(deal_ids, headers, sample=200):
+    """Dry run only: for deals with several calls, how often is the lowest
+    call id also the earliest call? Proves the shortcut fetch_first_calls
+    takes, on live data."""
+    base = "https://api.hubapi.com"
+    r = request_with_retry("POST", f"{base}/crm/v4/associations/deals/calls/batch/read",
+                           headers=headers, json={"inputs": [{"id": d} for d in deal_ids[-1000:]]})
+    if r.status_code not in (200, 207):
+        print(f"First-call check skipped: {r.status_code}")
+        return
+    multi = [[int(t["toObjectId"]) for t in x.get("to", [])] for x in r.json().get("results", [])]
+    multi = [ids for ids in multi if 2 <= len(ids) <= 100][:sample]
+    agree = 0
+    for ids in multi:
+        rr = request_with_retry("POST", f"{base}/crm/v3/objects/calls/batch/read", headers=headers,
+                                json={"inputs": [{"id": str(c)} for c in ids], "properties": ["hs_timestamp"]})
+        ts = {int(c["id"]): c.get("properties", {}).get("hs_timestamp") for c in rr.json().get("results", [])}
+        ts = {k: v for k, v in ts.items() if v}
+        if ts and min(ts, key=lambda k: pd.Timestamp(ts[k])) == min(ids):
+            agree += 1
+    print(f"DRY RUN: lowest call id is the earliest call for {agree} of {len(multi)} deals with 2+ calls")
+
+
+def add_first_call(df, deals, first_calls):
+    """First Call Direction (Inbound / Outbound / Unknown / No calls) and First
+    Call Date, one per row, in the order of `deals`."""
+    names = {"INBOUND": "Inbound", "OUTBOUND": "Outbound"}
+    directions, dates = [], []
+    for deal in deals:
+        hit = first_calls.get(str(deal["id"]))
+        if hit is None:
+            directions.append("No calls")
+            dates.append(None)
+        else:
+            direction, ts = hit
+            directions.append(names.get(direction, "Unknown"))
+            dates.append(parse_hubspot_datetime(ts))
+    df["first_call_direction"] = directions
+    df["first_call_date"] = pd.Series(dates, index=df.index, dtype=object)
+    return df
 
 
 def fetch_owners(headers):
@@ -1074,12 +1169,20 @@ def main():
     print(f"All {len(deals)} deals dated; by year created: "
           + ", ".join(f"{y}: {n}" for y, n in by_year.items()))
 
+    t0 = time.monotonic()
+    first_calls = fetch_first_calls([d["id"] for d in deals], hs_headers)
+    print(f"First calls: {len(first_calls)} of {len(deals)} deals have a call "
+          f"({time.monotonic() - t0:.0f}s)")
+    if DRY_RUN:
+        check_first_call_is_earliest([d["id"] for d in deals], hs_headers)
+
     owner_names = {k: v["name"] for k, v in owners.items()}
     df_deals = build_deals_frame(deals, properties, definitions, stage_labels,
                                  owner_names, pipeline_label)
     df_deals = add_stage_attributes(df_deals, stages)
     df_deals = add_close_date(df_deals, deals, stages)
     df_deals = add_inbound_call(df_deals)
+    df_deals = add_first_call(df_deals, deals, first_calls)
     df_deals = add_intake_date(df_deals)
     df_deals = add_durations(df_deals)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
@@ -1104,6 +1207,23 @@ def main():
             fail(f"cannot update '{DEALS_SHEET}' safely: {exc} — nothing written")
         if not splice.untouched_parts_identical(existing, workbook, report):
             fail("a part other than Deals would change — nothing written")
+        # Formulas in other tabs read Deals by column letter; make sure every
+        # column they read keeps its header.
+        refs = splice.referenced_columns(existing, DEALS_SHEET)
+        old_headers = splice.header_row(existing, DEALS_SHEET)
+        if refs:
+            print(f"Other tabs read {len(refs)} Deals column(s): " + "; ".join(
+                f"{col} ({old_headers.get(col, '?')}) <- {len(w)} formula(s), e.g. {', '.join(w[:3])}"
+                for col, w in sorted(refs.items(), key=lambda kv: splice.column_index(kv[0]))))
+        shifts = splice.shifted_references(existing, workbook, DEALS_SHEET)
+        if shifts:
+            for col, where, before, after in shifts:
+                print(f"  COLUMN SHIFT {col}: '{before}' -> '{after}' — read by {', '.join(where[:5])}")
+            if DRY_RUN:
+                print("DRY RUN: a real run would stop here to protect those formulas.")
+            else:
+                fail("a column other tabs read would change — nothing written. Put new columns "
+                     "at the far right (the 'Added later' group) instead.")
         print(f"Sheets in the workbook: {', '.join(report['sheets'])}")
         print(f"Replacing only '{DEALS_SHEET}' ({report['sheet_part']}); "
               f"{len(report['untouched'])} other parts copied unchanged")
@@ -1132,6 +1252,9 @@ def main():
             col = df_deals[header].dropna()
             median = f"{col.median():.0f}" if len(col) else "-"
             print(f"    {header}: {len(col)} rows, median {median}, negative {int((col < 0).sum())}")
+        print("DRY RUN: First Call Direction:")
+        for v, n in df_deals["First Call Direction"].value_counts().items():
+            print(f"    {n:>6}  {v}")
         print("DRY RUN: Created by Inbound Call:")
         for v, n in df_deals["Created by Inbound Call"].value_counts().items():
             print(f"    {n:>6}  {v}")

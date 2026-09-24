@@ -82,9 +82,18 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 | **People** | Deal Owner, Deal Owner ID, Intake - Case Supervisor, Senior Case Supervisor, Legal - Handling Attorney, Settlement Attorney |
 | **Stage history** | Date entered "<stage>" for every stage, in pipeline order |
 | **Audit** | Pipeline, Last Modified Date, Last Refresh |
+| **Added later** | First Call Direction, First Call Date |
 
-A property added to `BASE_PROPERTIES` without a place in `COLUMN_GROUPS`
-still comes out, just before Audit — and a test fails until it is placed.
+**New columns go at the far right** (the "Added later" group), never in the
+middle: formulas on other tabs (Maz) read Deals by column letter, and a
+column inserted in the middle shifts every letter after it. A property added
+to `BASE_PROPERTIES` without a place in `COLUMN_GROUPS` also lands at the far
+right (and a test fails until it is placed).
+
+**Formula guard.** Every run lists the Deals columns other tabs read (cell
+formulas, defined names, charts) and **refuses to write** if the header under
+any of them would change — the previous file stays as it was, and the log
+names the column, the header change and the formulas that read it.
 
 ### Column notes
 
@@ -117,6 +126,15 @@ still comes out, just before Audit — and a test fails until it is placed.
   usually replaced after intake). Outbound cannot be read from the deal — it
   needs the direction of the deal's first call on HubSpot's Calls object;
   every run logs whether the token can read it ("Calls API: …").
+- **First Call Direction** — Inbound / Outbound / Unknown / No calls: the
+  direction of the deal's first call, as Aircall logged it on HubSpot's Calls
+  object (`hs_call_direction`), and **First Call Date**. The first call is the
+  lowest call id associated with the deal (HubSpot ids grow with creation;
+  the dry run checks it against the call timestamps). Outbound means the firm
+  made the first contact — typical of form, mailer and PPC leads the dialer
+  works — not that a deal was created by an outbound call. About 60% of deals
+  have calls associated with the deal itself; the rest read "No calls".
+  Reading the associations and first calls adds ~10 minutes to a run.
 - **Manufacturer** is the full legal name, e.g. "General Motors LLC".
 - **People** columns are names; archived people resolve through the owner list.
 - **Stage history** — HubSpot has no "date entered" property for four stages:
