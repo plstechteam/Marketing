@@ -191,7 +191,7 @@ charts, pivots and shared strings (`splice.py`).
 ## Every run is a full refresh
 
 Nothing is carried over from the previous file. Each run pulls **every** deal
-created this year and **every** column from HubSpot again, and rewrites the
+ever created and **every** column from HubSpot again, and rewrites the
 Deals tab completely. So whatever changed in HubSpot since the last run — a stage move, a
 close, a new settlement date or fee, a reassigned attorney, a corrected
 manufacturer, a deal merged or deleted — is in the next file. There is no

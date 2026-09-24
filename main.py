@@ -950,7 +950,7 @@ def main():
     if not deals:
         fail("HubSpot returned no deals — refusing to write an empty report.")
 
-    # One row per deal created this year, every one dated. The windows already
+    # One row per deal, every one dated, none outside the pulled range. The windows already
     # guarantee it; checking the rows themselves means a filter that ever
     # stops meaning what we think fails here instead of shipping.
     created = [parse_hubspot_datetime(d.get("properties", {}).get("createdate")) for d in deals]
