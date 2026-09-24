@@ -1095,6 +1095,26 @@ def build_workbook(df_deals):
     return buf.getvalue()
 
 
+def preview_other_tabs(xlsx_bytes, refs, max_row=12):
+    """Dry run only: the labels and formulas at the top of each tab that reads
+    Deals, so a log shows what those formulas were built to read. Prints
+    literal text and formulas only — never a formula's cached result, which
+    can be client data."""
+    import openpyxl
+    sheets = sorted({w.split("!")[0] for ws in refs.values() for w in ws if "!" in w})
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=False)
+    for name in sheets:
+        if name not in wb.sheetnames:
+            continue
+        print(f"DRY RUN: top of '{name}' (labels and formulas only):")
+        for row in wb[name].iter_rows(min_row=1, max_row=max_row):
+            for cell in row:
+                v = cell.value
+                if isinstance(v, str) and v.strip():
+                    print(f"    {name}!{cell.coordinate}: {v[:120]}")
+    wb.close()
+
+
 def main():
     env = {k: os.environ.get(k) for k in
            ("HUBSPOT_TOKEN", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET")}
@@ -1219,6 +1239,8 @@ def main():
             print(f"Other tabs read {len(refs)} Deals column(s): " + "; ".join(
                 f"{col} ({old_headers.get(col, '?')}) <- {len(w)} formula(s), e.g. {', '.join(w[:3])}"
                 for col, w in sorted(refs.items(), key=lambda kv: splice.column_index(kv[0]))))
+        if DRY_RUN and refs:
+            preview_other_tabs(existing, refs)
         shifts = splice.shifted_references(existing, workbook, DEALS_SHEET)
         if shifts:
             for col, where, before, after in shifts:
