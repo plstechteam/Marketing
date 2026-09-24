@@ -335,6 +335,14 @@ def test_window_label():
     assert ".." in main.window_label(P.localize(datetime(2023, 3, 1)), P.localize(datetime(2023, 3, 16)))
 
 
+def test_inbound_call_from_aircall_name_or_entry_number():
+    assert main.inbound_call_for("Aircall new contact, +13234869961", None) == "Yes"
+    assert main.inbound_call_for("AIRCALL NEW CONTACT, +1", None) == "Yes"
+    assert main.inbound_call_for("Doe, Jane", "+1 213-513-7639") == "Yes"   # renamed, line kept
+    assert main.inbound_call_for("Doe, Jane", None) == "No"
+    assert main.inbound_call_for(None, None) == "No"
+
+
 def test_unique_headers():
     assert main.unique_headers([("Close Out", "a"), ("Close Out", "b"), ("X", "c")]) == \
         ["Close Out (a)", "Close Out (b)", "X"]
