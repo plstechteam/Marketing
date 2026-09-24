@@ -9,6 +9,7 @@ calculation lives in Power BI, none of it here.
 import io
 import os
 import sys
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -215,7 +216,27 @@ RETRY_STATUS   = {429, 500, 502, 503, 504}
 LOCKED_STATUS      = 423
 LOCKED_RETRY_DELAY = 60
 
+# HubSpot allows a private app ~100 requests per rolling 10 seconds (more on
+# higher tiers). Every HubSpot request, from any thread, waits for its slot so
+# the parallel call reads stay under it; a 429 still gets retried.
+HUBSPOT_HOST        = "api.hubapi.com"
+HUBSPOT_MAX_PER_SEC = 8
+RATE_LIMIT_ATTEMPTS = 8     # 429s clear once the 10-second window rolls
+RATE_LIMIT_DELAY    = 10
+
 session = requests.Session()
+session.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=16))
+_slot_lock = threading.Lock()
+_next_slot = [0.0]
+
+
+def _wait_for_hubspot_slot():
+    with _slot_lock:
+        now = time.monotonic()
+        start = max(now, _next_slot[0])
+        _next_slot[0] = start + 1.0 / HUBSPOT_MAX_PER_SEC
+    if start > now:
+        time.sleep(start - now)
 
 
 def _retry_delay(response, attempt):
@@ -236,7 +257,11 @@ def request_with_retry(method, url, *, timeout=HTTP_TIMEOUT, **kwargs):
     """Send a request, retrying rate limits, 5xx, 423 and network errors."""
     response = None
     reason = None
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    attempt = 0
+    while True:
+        attempt += 1
+        if HUBSPOT_HOST in url:
+            _wait_for_hubspot_slot()
         try:
             response = session.request(method, url, timeout=timeout, **kwargs)
         except requests.RequestException as exc:
@@ -248,14 +273,17 @@ def request_with_retry(method, url, *, timeout=HTTP_TIMEOUT, **kwargs):
                 return response
             reason = f"HTTP {response.status_code}"
 
-        if attempt == MAX_ATTEMPTS:
+        limit = RATE_LIMIT_ATTEMPTS if response is not None and response.status_code == 429 else MAX_ATTEMPTS
+        if attempt >= limit:
             break
         wait = _retry_delay(response, attempt)
-        print(f"  {method} failed ({reason}) — attempt {attempt}/{MAX_ATTEMPTS}, retrying in {wait:.0f}s")
+        if response is not None and response.status_code == 429:
+            wait = max(wait, RATE_LIMIT_DELAY)
+        print(f"  {method} failed ({reason}) — attempt {attempt}/{limit}, retrying in {wait:.0f}s")
         time.sleep(wait)
 
     if response is None:
-        print(f"ERROR: {method} {url.split('?')[0]} failed after {MAX_ATTEMPTS} attempts — {reason}")
+        print(f"ERROR: {method} {url.split('?')[0]} failed after {attempt} attempts — {reason}")
         sys.exit(1)
     return response
 
@@ -678,7 +706,7 @@ def probe_calls_access(headers):
         print(f"Calls API: not readable ({r.status_code}) {detail[:200]}")
 
 
-CALL_READ_WORKERS = 8   # parallel calls batch reads; request_with_retry absorbs 429s
+CALL_READ_WORKERS = 6   # parallel calls batch reads, paced by HUBSPOT_MAX_PER_SEC
 
 
 def earliest_call(calls):

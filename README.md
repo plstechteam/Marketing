@@ -135,7 +135,8 @@ names the column, the header change and the formulas that read it.
   contact — typical of form, mailer and PPC leads the dialer works — not that
   a deal was created by an outbound call. About 3 of 4 deals have calls
   associated with the deal itself; the rest read "No calls".
-  Reading the associations and every call adds a large part of the run time.
+  Reading the associations and every call adds a large part of the run time;
+  all HubSpot requests are paced under its 10-second rate limit.
 - **Manufacturer** is the full legal name, e.g. "General Motors LLC".
 - **People** columns are names; archived people resolve through the owner list.
 - **Stage history** — HubSpot has no "date entered" property for four stages:
