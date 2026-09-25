@@ -100,6 +100,7 @@ BASE_PROPERTIES = [
     "hs_v2_date_exited_5792630",    # left New File Set Up = ready for Legal
     "total_settled_attorneys_fees_and_cost",
     "net_attorney_fees",
+    "total_settlement_amount",      # read into Total Settlement Amount (settled deals only)
     # Vehicle. Manufacturer is the full legal name (s__manufacturer), not
     # the short code, so it can be matched to the opt-in / opt-out list.
     "s__manufacturer",
@@ -620,7 +621,11 @@ def add_durations(df):
 
 # Headers for the columns this script adds or renames; everything else is
 # headed by its HubSpot label.
+SETTLEMENT_SOURCE = "total_settlement_amount"
+SETTLEMENT_AMOUNT = "settlement_amount"
+
 FIXED_HEADERS = {
+    SETTLEMENT_AMOUNT: "Total Settlement Amount",
     "hs_object_id": "Record ID",
     # Fixed rather than HubSpot's label: the dry-run summary groups by it.
     "dealstage": "Deal Stage",
@@ -684,7 +689,7 @@ COLUMN_GROUPS = [
     # letter after it. The run also refuses to write if a column another tab
     # reads would change header (see splice.shifted_references).
     ("Added later", ["created_by_inbound_call", "first_call_direction", "first_call_date",
-                     "intake_date_source", INTAKE_LEGACY]),
+                     "intake_date_source", INTAKE_LEGACY, SETTLEMENT_AMOUNT]),
 ]
 
 
@@ -707,6 +712,18 @@ def header_for(key, definitions):
     return FIXED_HEADERS.get(key) or (definitions.get(key, {}).get("label") or key).strip()
 
 
+# Total Settlement Amount: HubSpot's figure, on settled deals only (Date -
+# Settled filled — the same test as Is Settled), so counting the column's
+# values counts settlements and summing it sums them. Everything else is an
+# empty cell. (A few deals carry an amount before their settlement date is
+# set; they get it once the date is in.)
+def add_settlement_amount(df):
+    raw = df.pop(SETTLEMENT_SOURCE) if SETTLEMENT_SOURCE in df.columns else pd.Series(index=df.index, dtype=float)
+    settled = df["date___settled"].notna() if "date___settled" in df.columns else False
+    df[SETTLEMENT_AMOUNT] = pd.to_numeric(raw, errors="coerce").where(settled).astype(float)
+    return df
+
+
 def to_sheet(df, definitions, stage_columns):
     """Order the columns by COLUMN_GROUPS and head them with labels. Close
     Date Source is written as the label of the field used, so the row says
@@ -715,6 +732,12 @@ def to_sheet(df, definitions, stage_columns):
     for source in ("close_date_source", "intake_date_source"):
         if source in df.columns:
             df[source] = df[source].map(lambda k: header_for(k, definitions) if k else None)
+    # Text is trimmed (spaces and invisible characters at either end) and a
+    # value left empty becomes a blank cell, so COUNTA/COUNTBLANK and Power
+    # BI's blank tests see exactly the cells that hold something.
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].map(lambda v: splice.clean_text(v) if isinstance(v, str) else v)
     df.columns = unique_headers([(header_for(c, definitions), c) for c in df.columns])
     return df
 
@@ -1337,7 +1360,9 @@ def build_workbook(df_deals):
             elif isinstance(v, (int, float)):
                 ws.write_number(r, c, v)
             else:
-                ws.write_string(r, c, str(v))
+                text = splice.clean_text(v)
+                if text is not None:
+                    ws.write_string(r, c, text)
     wb.close()
     return buf.getvalue()
 
@@ -1470,6 +1495,7 @@ def main():
     df_deals = add_first_call(df_deals, deals, first_calls)
     df_deals = add_intake_date(df_deals)
     df_deals = add_durations(df_deals)
+    df_deals = add_settlement_amount(df_deals)
     refreshed = now_pacific.replace(tzinfo=None, microsecond=0)
     df_deals["last_refresh"] = refreshed
     df_deals = to_sheet(df_deals, definitions, stage_columns)

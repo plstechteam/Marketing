@@ -132,7 +132,10 @@ def sheet_xml_chunks(df, s_datetime, s_date, rows_per_chunk=2000):
                     continue
                 out.append(f'<c r="{ref}"><v>{float(v)!r}</v></c>')
             else:
-                text = _text(v)
+                cleaned = clean_text(v)
+                if cleaned is None:   # blank or only spaces/invisible characters
+                    continue
+                text = _text(cleaned)
                 space = ' xml:space="preserve"' if text != text.strip() else ""
                 out.append(f'<c r="{ref}" t="inlineStr"><is><t{space}>{text}</t></is></c>')
         out.append("</row>")
@@ -140,6 +143,18 @@ def sheet_xml_chunks(df, s_datetime, s_date, rows_per_chunk=2000):
                '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
                "</worksheet>")
     yield "".join(out).encode("utf-8")
+
+
+# Characters that print as nothing; str.strip() already takes every Unicode
+# space (incl. the non-breaking space HubSpot pastes often carry).
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
+
+
+def clean_text(value):
+    """Text with invisible characters removed and the ends trimmed; None if
+    nothing is left, so the cell is written empty."""
+    text = str(value).translate(_INVISIBLE).strip()
+    return text or None
 
 
 def _attrs(tag):
