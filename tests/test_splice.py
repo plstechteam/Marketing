@@ -79,7 +79,7 @@ def test_new_deals_data_reads_back_with_the_right_types():
     assert [c.value for c in deals[1]] == list(NEW.columns)
     assert [c.value for c in deals[2]] == [
         "n1", "Settled", 5500.5, datetime(2026, 3, 1, 4, 5, 6), datetime(2026, 3, 5), 1, True]
-    assert deals["B3"].value == " lead space"
+    assert deals["B3"].value == "lead space"      # trimmed
     assert deals["B4"].value == "=HYPERLINK(1)" and deals["B4"].data_type == "s"  # text, not formula
     assert deals["B5"].value == "x&<y>"
     assert deals.max_row == 6                      # old 4 rows gone, 5 + header
@@ -139,6 +139,18 @@ def test_shift_guard_catches_a_column_inserted_in_the_middle_only():
 def test_column_letters():
     assert [splice.column_letter(i) for i in (0, 25, 26, 51, 52, 701, 702)] == \
         ["A", "Z", "AA", "AZ", "BA", "ZZ", "AAA"]
+
+
+def test_blank_text_is_an_empty_cell():
+    df = pd.DataFrame({"Record ID": ["a", "b", "c", "d", "e"],
+                       "Note": ["", "   ", "\u00a0\u200b", " x\u00a0", None],
+                       "Amount": [None, np.nan, 0.0, 12.5, None]})
+    after, _ = splice.replace_sheet(fixture(), "Deals", df)
+    xml = zipfile.ZipFile(io.BytesIO(after)).read("xl/worksheets/sheet1.xml").decode()
+    for ref in ("B2", "B3", "B4", "B6", "C2", "C3", "C6"):
+        assert f'r="{ref}"' not in xml, ref     # no cell at all, not an empty string
+    ws = openpyxl.load_workbook(io.BytesIO(after))["Deals"]
+    assert ws["B5"].value == "x" and ws["C4"].value == 0 and ws["C5"].value == 12.5
 
 
 if __name__ == "__main__":

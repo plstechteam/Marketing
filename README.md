@@ -82,7 +82,7 @@ Grouped left to right in the order the funnel reads (`COLUMN_GROUPS` in
 | **People** | Deal Owner, Deal Owner ID, Intake - Case Supervisor, Senior Case Supervisor, Legal - Handling Attorney, Settlement Attorney |
 | **Stage history** | Date entered "<stage>" for every stage, in pipeline order |
 | **Audit** | Pipeline, Last Modified Date, Last Refresh |
-| **Added later** | Created by Inbound Call, First Call Direction, First Call Date, Intake Date Source, Date - Inquiry Qualified |
+| **Added later** | Created by Inbound Call, First Call Direction, First Call Date, Intake Date Source, Date - Inquiry Qualified, Total Settlement Amount |
 
 **New columns go at the far right** (the "Added later" group), never in the
 middle: formulas on other tabs (Maz) read Deals by column letter, and a
@@ -145,6 +145,14 @@ run with the `accept_column_changes` input ticked.
   a deal was created by an outbound call. About 3 of 4 deals have calls
   associated with the deal itself; the rest read "No calls".
   See **Calls cache** below for how this stays fast.
+- **Total Settlement Amount** — HubSpot's Total Settlement Amount, on
+  settled deals only (Date - Settled filled, the same test as Is Settled);
+  every other row is an empty cell, so counting the column counts
+  settlements and summing it sums them. A deal whose amount is entered
+  before its settlement date shows it once the date is in.
+- **Blank cells are truly empty.** Text is trimmed of spaces and invisible
+  characters at both ends, and a value with nothing left is written as no
+  cell at all — never "", a space or 0 — in every column.
 - **Manufacturer** is the full legal name, e.g. "General Motors LLC".
 - **People** columns are names; archived people resolve through the owner list.
 - **Stage history** — HubSpot has no "date entered" property for four stages:

@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import main  # noqa: E402
+import pandas as pd  # noqa: E402
 
 P = main.PACIFIC
 
@@ -168,7 +169,8 @@ def test_sheet_lookups_order_and_headers():
 
 def test_every_base_property_has_a_place_in_the_layout():
     placed = {k for _, keys in main.COLUMN_GROUPS for k in keys}
-    unplaced = [p for p in main.BASE_PROPERTIES if p not in placed]
+    consumed = {main.SETTLEMENT_SOURCE}   # read into another column, not shown itself
+    unplaced = [p for p in main.BASE_PROPERTIES if p not in placed | consumed]
     assert not unplaced, f"add to COLUMN_GROUPS: {unplaced}"
     assert set(main.FIXED_HEADERS) <= placed
 
@@ -356,8 +358,8 @@ def test_first_call_columns():
 
 def test_new_columns_sit_at_the_far_right():
     keys = [k for _, ks in main.COLUMN_GROUPS for k in ks]
-    assert keys[-5:] == ["created_by_inbound_call", "first_call_direction", "first_call_date",
-                         "intake_date_source", "date___inquiry_qualified"]
+    assert keys[-6:] == ["created_by_inbound_call", "first_call_direction", "first_call_date",
+                         "intake_date_source", "date___inquiry_qualified", "settlement_amount"]
     assert main.COLUMN_GROUPS[-1][0] == "Added later"
 
 
@@ -458,6 +460,23 @@ def test_fetch_first_calls_with_a_cache_reads_only_new_calls():
         assert first["2"] == ("OUTBOUND", "2026-01-15T00:00:00Z")
     finally:
         main.request_with_retry = real
+
+
+def test_settlement_amount_only_on_settled_deals():
+    df = pd.DataFrame({"date___settled": [date(2026, 3, 1), None, date(2025, 1, 17), date(2026, 5, 2)],
+                       "total_settlement_amount": [59571.24, 8600.0, 0.0, None]})
+    df = main.add_settlement_amount(df)
+    assert "total_settlement_amount" not in df.columns
+    got = df["settlement_amount"].tolist()
+    assert got[0] == 59571.24 and got[2] == 0.0
+    assert pd.isna(got[1]) and pd.isna(got[3])   # not settled / no amount -> empty cell
+
+
+def test_text_is_trimmed_and_blank_text_is_empty():
+    df = pd.DataFrame({"dealname": [" Soriano, Aldo ", "   ", "\u200b", None], "lead___source": ["Web"] * 4})
+    out = main.to_sheet(df, {}, [])
+    assert out.iloc[:, 0].tolist()[:1] == ["Soriano, Aldo"]
+    assert all(v is None for v in out.iloc[1:, 0].tolist())
 
 
 if __name__ == "__main__":
