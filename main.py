@@ -1580,6 +1580,10 @@ def main():
         print("DRY RUN: AB 1755 by manufacturer:")
         for v, n in df_deals[AB1755_HEADER].value_counts(dropna=False).items():
             print(f"    {n:>6}  {v}")
+        amounts = df_deals["Total Settlement Amount"]
+        print(f"DRY RUN: Total Settlement Amount on {int(amounts.notna().sum())} of "
+              f"{int(settled.sum())} settled deals; sum ${amounts.sum():,.2f}; "
+              f"on unsettled rows: {int((amounts.notna() & ~settled).sum())}")
         print("DRY RUN: rows with a value, per column:")
         for col, n in filled.items():
             print(f"    {n:>6}  {col}")
